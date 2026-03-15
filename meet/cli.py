@@ -271,7 +271,7 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
         mixdown=mixdown,
     )
 
-    if not no_diarize and not config.hf_token:
+    if not no_diarize and not config.hf_token and mixdown != "dual":
         click.echo("Warning: No HF_TOKEN found. Diarization will be skipped.", err=True)
         click.echo("  Set HF_TOKEN env var or pass --hf-token", err=True)
         click.echo("  Get a token at: https://huggingface.co/settings/tokens", err=True)
@@ -393,7 +393,7 @@ def run(output_dir, model, device, compute_type, batch_size,
         mixdown=mixdown,
     )
 
-    if not config.hf_token:
+    if not config.hf_token and mixdown != "dual":
         click.echo("Warning: No HF_TOKEN found. Diarization will be skipped.", err=True)
         click.echo("  Set HF_TOKEN env var or pass --hf-token", err=True)
         click.echo()
