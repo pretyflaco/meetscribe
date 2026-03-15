@@ -614,7 +614,7 @@ def get_audio_duration(audio_file: Path) -> float:
         return 0.0
 
 
-def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig) -> Transcript:
+def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig, duration: float) -> Transcript:
     """Transcribe each stereo channel separately and merge results.
 
     Used when mixdown="dual" — instead of mixing both channels into mono
@@ -623,15 +623,17 @@ def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig) -> T
 
     Skips diarization entirely: channel identity = speaker identity.
     """
+    import numpy as np
     import torch
     import whisperx
 
-    duration = get_audio_duration(audio_file)
-
-    mic_path = _extract_mono(audio_file, channel=0)
-    sys_path = _extract_mono(audio_file, channel=1)
+    mic_path = None
+    sys_path = None
 
     try:
+        mic_path = _extract_mono(audio_file, channel=0)
+        sys_path = _extract_mono(audio_file, channel=1)
+
         # ── Load model once ──
         vad_options = {
             "vad_onset": config.vad_onset,
@@ -648,12 +650,13 @@ def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig) -> T
             vad_options=vad_options,
         )
 
+        # Pre-compute padding
+        pad_samples = int(config.audio_pad_seconds * 16000) if config.audio_pad_seconds > 0 else 0
+
         # ── Transcribe mic channel ──
         print(f"  Transcribing mic channel (left)...")
         mic_audio = whisperx.load_audio(str(mic_path))
-        if config.audio_pad_seconds > 0:
-            import numpy as np
-            pad_samples = int(config.audio_pad_seconds * 16000)
+        if pad_samples > 0:
             mic_audio = np.concatenate([mic_audio, np.zeros(pad_samples, dtype=mic_audio.dtype)])
         mic_result = model.transcribe(mic_audio, batch_size=config.batch_size)
 
@@ -665,9 +668,7 @@ def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig) -> T
         # ── Transcribe system channel ──
         print(f"  Transcribing system channel (right)...")
         sys_audio = whisperx.load_audio(str(sys_path))
-        if config.audio_pad_seconds > 0:
-            import numpy as np
-            pad_samples = int(config.audio_pad_seconds * 16000)
+        if pad_samples > 0:
             sys_audio = np.concatenate([sys_audio, np.zeros(pad_samples, dtype=sys_audio.dtype)])
         sys_result = model.transcribe(sys_audio, batch_size=config.batch_size)
 
@@ -749,10 +750,11 @@ def _transcribe_dual_channel(audio_file: Path, config: TranscriptionConfig) -> T
 
     finally:
         for p in (mic_path, sys_path):
-            try:
-                p.unlink()
-            except OSError:
-                pass
+            if p is not None:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
 
 
 def transcribe(audio_file: str | Path, config: TranscriptionConfig | None = None) -> Transcript:
@@ -787,7 +789,7 @@ def transcribe(audio_file: str | Path, config: TranscriptionConfig | None = None
 
     if is_stereo and config.use_dual_channel and config.mixdown == "dual":
         print(f"  Dual-channel detected: transcribing channels separately")
-        return _transcribe_dual_channel(audio_path, config)
+        return _transcribe_dual_channel(audio_path, config, duration)
 
     if is_stereo and config.use_dual_channel:
         mono_path = _mixdown_to_mono(audio_path)
