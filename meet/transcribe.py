@@ -787,8 +787,8 @@ def transcribe(audio_file: str | Path, config: TranscriptionConfig | None = None
         return _transcribe_dual_channel(audio_path, config)
 
     if is_stereo and config.use_dual_channel:
-        mono_path = _extract_mono(audio_path, channel=0)
-        print(f"  Dual-channel detected: extracting mic channel for transcription")
+        mono_path = _mixdown_to_mono(audio_path)
+        print(f"  Dual-channel detected: mixing down to mono for transcription")
     else:
         mono_path = audio_path
 
