@@ -236,9 +236,11 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
               help="Ollama model for summary (default: qwen3.5:9b)")
 @click.option("--skip-alignment", is_flag=True, default=False,
               help="Skip word-level alignment (useful if alignment model is unavailable)")
+@click.option("--mixdown", type=click.Choice(["mic", "avg"]), default="mic",
+              help="Stereo mixdown mode: mic=left channel only, avg=transcribe both channels separately (default: mic)")
 def transcribe(audio_file, model, device, compute_type, batch_size,
                language, hf_token, min_speakers, max_speakers, output_dir,
-               no_diarize, summarize, summary_model, skip_alignment):
+               no_diarize, summarize, summary_model, skip_alignment, mixdown):
     """Transcribe a recorded audio file with speaker diarization."""
     from meet.transcribe import (
         TranscriptionConfig, transcribe as do_transcribe,
@@ -266,6 +268,7 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         skip_alignment=skip_alignment,
+        mixdown=mixdown,
     )
 
     if not no_diarize and not config.hf_token:
@@ -353,9 +356,11 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
               help="Ollama model for summary (default: qwen3.5:9b)")
 @click.option("--skip-alignment", is_flag=True, default=False,
               help="Skip word-level alignment (useful if alignment model is unavailable)")
+@click.option("--mixdown", type=click.Choice(["mic", "avg"]), default="mic",
+              help="Stereo mixdown mode: mic=left channel only, avg=transcribe both channels separately (default: mic)")
 def run(output_dir, model, device, compute_type, batch_size,
         language, hf_token, min_speakers, max_speakers, virtual_sink,
-        summarize, summary_model, skip_alignment):
+        summarize, summary_model, skip_alignment, mixdown):
     """Record a meeting, then transcribe when stopped with Ctrl+C."""
     from meet.capture import create_session, check_prerequisites
     from meet.transcribe import (
@@ -385,6 +390,7 @@ def run(output_dir, model, device, compute_type, batch_size,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         skip_alignment=skip_alignment,
+        mixdown=mixdown,
     )
 
     if not config.hf_token:

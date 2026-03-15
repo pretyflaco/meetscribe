@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from meet.transcribe import Segment, Speaker, Transcript, _fmt_time, _fmt_srt_time
+from meet.transcribe import Segment, Speaker, Transcript, TranscriptionConfig, _fmt_time, _fmt_srt_time
 
 
 # ─── Transcript.to_text() ──────────────────────────────────────────────────
@@ -179,3 +179,59 @@ class TestLabelSpeakersFromChannels:
         )
         assert segs == []
         assert spks == []
+
+    def test_no_mic_dominant_speaker_all_remote(self, tmp_path):
+        """When no speaker has mic_ratio > 0.5, all should be labeled REMOTE."""
+        import numpy as np
+        import wave as wave_mod
+        from meet.transcribe import _label_speakers_from_channels
+
+        # Create a stereo WAV where system channel is always louder
+        sr = 16000
+        duration = 10.0
+        n_frames = int(duration * sr)
+        t = np.linspace(0, duration, n_frames, dtype=np.float32)
+
+        # Mic: very quiet, System: loud
+        mic = (500 * np.sin(2 * np.pi * 440 * t)).astype(np.int16)
+        system = (20000 * np.sin(2 * np.pi * 880 * t)).astype(np.int16)
+        stereo = np.column_stack((mic, system)).flatten()
+
+        wav_path = tmp_path / "system-only.wav"
+        with wave_mod.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(stereo.tobytes())
+
+        segments = [
+            Segment(start=0.0, end=5.0, text="Hello", speaker="SPEAKER_00"),
+            Segment(start=5.0, end=10.0, text="World", speaker="SPEAKER_01"),
+        ]
+        speakers = [Speaker(id="SPEAKER_00"), Speaker(id="SPEAKER_01")]
+
+        new_segs, new_spks = _label_speakers_from_channels(
+            wav_path, segments, speakers,
+        )
+
+        # No speaker should be labeled YOU
+        labels = {s.speaker for s in new_segs}
+        assert "YOU" not in labels
+        # All should be REMOTE variants
+        assert all("REMOTE" in label for label in labels)
+
+
+# ─── TranscriptionConfig validation ──────────────────────────────────────
+
+class TestTranscriptionConfig:
+    def test_default_mixdown_is_mic(self):
+        config = TranscriptionConfig()
+        assert config.mixdown == "mic"
+
+    def test_valid_mixdown_avg(self):
+        config = TranscriptionConfig(mixdown="avg")
+        assert config.mixdown == "avg"
+
+    def test_invalid_mixdown_raises(self):
+        with pytest.raises(ValueError, match="Invalid mixdown mode"):
+            TranscriptionConfig(mixdown="stereo")
