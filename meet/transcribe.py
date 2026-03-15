@@ -383,7 +383,7 @@ class TranscriptionConfig:
     # chose not to download it.
     skip_alignment: bool = False
     # Mixdown mode for stereo recordings:
-    #   "mono" = extract left (mic) channel only (default, uses diarization)
+    #   "mono" = mix both channels to mono (default, uses diarization)
     #   "dual" = transcribe each channel separately, label as YOU/REMOTE
     mixdown: str = "mono"
 
@@ -686,7 +686,7 @@ def _transcribe_dual_channel(
 ) -> Transcript:
     """Transcribe each stereo channel separately and merge results.
 
-    Used when mixdown="avg" — instead of mixing both channels into mono
+    Used when mixdown="dual" — instead of mixing both channels into mono
     (which causes WhisperX to suppress the quieter voice), this transcribes
     the mic and system channels independently and merges by timestamp.
 
