@@ -346,14 +346,14 @@ class TranscriptionConfig:
     # chose not to download it.
     skip_alignment: bool = False
     # Mixdown mode for stereo recordings:
-    #   "mic" = extract left (mic) channel only (default, uses diarization)
-    #   "avg" = transcribe each channel separately, label as YOU/REMOTE
-    mixdown: str = "mic"
+    #   "mono" = extract left (mic) channel only (default, uses diarization)
+    #   "dual" = transcribe each channel separately, label as YOU/REMOTE
+    mixdown: str = "mono"
 
     def __post_init__(self):
-        if self.mixdown not in ("mic", "avg"):
+        if self.mixdown not in ("mono", "dual"):
             raise ValueError(
-                f"Invalid mixdown mode '{self.mixdown}': must be 'mic' or 'avg'"
+                f"Invalid mixdown mode '{self.mixdown}': must be 'mono' or 'dual'"
             )
         # Resolve model aliases (e.g. "large-v3-turbo" -> local CTranslate2 path)
         self.model = resolve_model(self.model)
@@ -782,7 +782,7 @@ def transcribe(audio_file: str | Path, config: TranscriptionConfig | None = None
     # but keep the stereo file for channel-aware diarization hints
     is_stereo = _is_stereo(audio_path)
 
-    if is_stereo and config.use_dual_channel and config.mixdown == "avg":
+    if is_stereo and config.use_dual_channel and config.mixdown == "dual":
         print(f"  Dual-channel detected: transcribing channels separately")
         return _transcribe_dual_channel(audio_path, config)
 

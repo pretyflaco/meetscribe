@@ -224,13 +224,13 @@ class TestLabelSpeakersFromChannels:
 # ─── TranscriptionConfig validation ──────────────────────────────────────
 
 class TestTranscriptionConfig:
-    def test_default_mixdown_is_mic(self):
+    def test_default_mixdown_is_mono(self):
         config = TranscriptionConfig()
-        assert config.mixdown == "mic"
+        assert config.mixdown == "mono"
 
-    def test_valid_mixdown_avg(self):
-        config = TranscriptionConfig(mixdown="avg")
-        assert config.mixdown == "avg"
+    def test_valid_mixdown_dual(self):
+        config = TranscriptionConfig(mixdown="dual")
+        assert config.mixdown == "dual"
 
     def test_invalid_mixdown_raises(self):
         with pytest.raises(ValueError, match="Invalid mixdown mode"):
