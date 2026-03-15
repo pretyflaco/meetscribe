@@ -240,7 +240,7 @@ class TestTranscriptionConfig:
             TranscriptionConfig(mixdown="stereo")
 
 
-# ─── Dual-channel dispatch ────────────────────────────────────────────────
+# ─── Dual-channel dispatch (mocked — full pipeline requires GPU) ──────────
 
 class TestDualChannelDispatch:
     def test_dual_mixdown_dispatches_to_dual_channel(self, stereo_wav):
@@ -259,8 +259,6 @@ class TestDualChannelDispatch:
         """Stereo audio with mixdown='mono' should NOT call _transcribe_dual_channel."""
         with patch("meet.transcribe._transcribe_dual_channel") as mock_dual:
             config = TranscriptionConfig(mixdown="mono")
-            try:
+            with pytest.raises(Exception):
                 do_transcribe(str(stereo_wav), config)
-            except Exception:
-                pass  # Full pipeline needs GPU/models — we only care about dispatch
             mock_dual.assert_not_called()
