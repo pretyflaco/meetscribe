@@ -382,8 +382,16 @@ class TranscriptionConfig:
     # fewer segments).  Used when alignment model is missing and the user
     # chose not to download it.
     skip_alignment: bool = False
+    # Mixdown mode for stereo recordings:
+    #   "mic" = extract left (mic) channel only (default, uses diarization)
+    #   "avg" = transcribe each channel separately, label as YOU/REMOTE
+    mixdown: str = "mic"
 
     def __post_init__(self):
+        if self.mixdown not in ("mic", "avg"):
+            raise ValueError(
+                f"Invalid mixdown mode '{self.mixdown}': must be 'mic' or 'avg'"
+            )
         # Resolve model aliases (e.g. "large-v3-turbo" -> local CTranslate2 path)
         self.model = resolve_model(self.model)
 
@@ -673,6 +681,177 @@ def get_audio_duration(audio_file: Path) -> float:
         return 0.0
 
 
+def _transcribe_dual_channel(
+    audio_file: Path, config: TranscriptionConfig
+) -> Transcript:
+    """Transcribe each stereo channel separately and merge results.
+
+    Used when mixdown="avg" — instead of mixing both channels into mono
+    (which causes WhisperX to suppress the quieter voice), this transcribes
+    the mic and system channels independently and merges by timestamp.
+
+    Skips diarization entirely: channel identity = speaker identity.
+    """
+    import torch
+    import whisperx
+
+    duration = get_audio_duration(audio_file)
+
+    mic_path = _extract_mono(audio_file, channel=0)
+    sys_path = _extract_mono(audio_file, channel=1)
+
+    try:
+        # ── Load model once ──
+        vad_options = {
+            "vad_onset": config.vad_onset,
+            "vad_offset": config.vad_offset,
+        }
+        whisper_lang = None if config.language == "auto" else config.language
+
+        print(
+            f"  Loading model: {config.model} ({config.compute_type}) on {config.device}"
+        )
+        model = whisperx.load_model(
+            config.model,
+            config.device,
+            compute_type=config.compute_type,
+            language=whisper_lang,
+            vad_options=vad_options,
+        )
+
+        # ── Transcribe mic channel ──
+        print(f"  Transcribing mic channel (left)...")
+        mic_audio = whisperx.load_audio(str(mic_path))
+        if config.audio_pad_seconds > 0:
+            import numpy as np
+
+            pad_samples = int(config.audio_pad_seconds * 16000)
+            mic_audio = np.concatenate(
+                [mic_audio, np.zeros(pad_samples, dtype=mic_audio.dtype)]
+            )
+        mic_result = model.transcribe(mic_audio, batch_size=config.batch_size)
+
+        # Resolve language from first transcription result
+        detected_language = mic_result.get("language", whisper_lang or "en")
+        if config.language == "auto":
+            print(f"  Detected language: {detected_language}")
+
+        # ── Transcribe system channel ──
+        print(f"  Transcribing system channel (right)...")
+        sys_audio = whisperx.load_audio(str(sys_path))
+        if config.audio_pad_seconds > 0:
+            import numpy as np
+
+            pad_samples = int(config.audio_pad_seconds * 16000)
+            sys_audio = np.concatenate(
+                [sys_audio, np.zeros(pad_samples, dtype=sys_audio.dtype)]
+            )
+        sys_result = model.transcribe(sys_audio, batch_size=config.batch_size)
+
+        # Free transcription model
+        del model
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # ── Align both channels ──
+        if config.skip_alignment:
+            print(f"  Skipping alignment (--skip-alignment)")
+        elif detected_language in ALIGNMENT_MODELS and not check_alignment_model_cached(
+            detected_language
+        ):
+            gc.collect()
+            torch.cuda.empty_cache()
+            raise AlignmentModelMissing(detected_language)
+        else:
+            print(f"  Aligning word timestamps ({detected_language})...")
+            try:
+                model_a, metadata = whisperx.load_align_model(
+                    language_code=detected_language,
+                    device=config.device,
+                )
+                mic_result = whisperx.align(
+                    mic_result["segments"],
+                    model_a,
+                    metadata,
+                    mic_audio,
+                    config.device,
+                    return_char_alignments=False,
+                )
+                sys_result = whisperx.align(
+                    sys_result["segments"],
+                    model_a,
+                    metadata,
+                    sys_audio,
+                    config.device,
+                    return_char_alignments=False,
+                )
+                del model_a
+                gc.collect()
+                torch.cuda.empty_cache()
+            except Exception as align_exc:
+                if detected_language in ALIGNMENT_MODELS:
+                    raise AlignmentModelMissing(detected_language) from align_exc
+                print(
+                    f"  Warning: alignment failed ({align_exc}), continuing without word-level timestamps"
+                )
+
+        # ── Merge segments ──
+        max_t = duration if duration and duration > 0 else float("inf")
+        segments: list[Segment] = []
+
+        for seg in mic_result["segments"]:
+            seg_start = min(seg["start"], max_t)
+            seg_end = min(seg["end"], max_t)
+            if seg_end <= seg_start:
+                continue
+            segments.append(
+                Segment(
+                    start=seg_start,
+                    end=seg_end,
+                    text=seg["text"],
+                    speaker="YOU",
+                    words=seg.get("words"),
+                )
+            )
+
+        for seg in sys_result["segments"]:
+            seg_start = min(seg["start"], max_t)
+            seg_end = min(seg["end"], max_t)
+            if seg_end <= seg_start:
+                continue
+            segments.append(
+                Segment(
+                    start=seg_start,
+                    end=seg_end,
+                    text=seg["text"],
+                    speaker="REMOTE",
+                    words=seg.get("words"),
+                )
+            )
+
+        segments.sort(key=lambda s: s.start)
+
+        speakers = [
+            Speaker(id="YOU", label="YOU"),
+            Speaker(id="REMOTE", label="REMOTE"),
+        ]
+
+        return Transcript(
+            segments=segments,
+            speakers=speakers,
+            language=detected_language,
+            audio_file=str(audio_file),
+            duration=duration,
+        )
+
+    finally:
+        for p in (mic_path, sys_path):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 def transcribe(
     audio_file: str | Path, config: TranscriptionConfig | None = None
 ) -> Transcript:
@@ -701,9 +880,14 @@ def transcribe(
     # If dual-channel, mixdown to mono for the main transcription pipeline
     # but keep the stereo file for channel-aware diarization hints
     is_stereo = _is_stereo(audio_path)
+
+    if is_stereo and config.use_dual_channel and config.mixdown == "avg":
+        print(f"  Dual-channel detected: transcribing channels separately")
+        return _transcribe_dual_channel(audio_path, config)
+
     if is_stereo and config.use_dual_channel:
-        mono_path = _mixdown_to_mono(audio_path)
-        print(f"  Dual-channel detected: mixing down to mono for transcription")
+        mono_path = _extract_mono(audio_path, channel=0)
+        print(f"  Dual-channel detected: extracting mic channel for transcription")
     else:
         mono_path = audio_path
 
@@ -930,17 +1114,29 @@ def _label_speakers_from_channels(
         label = "mic-dominant" if ratio > 0.5 else "system-dominant"
         print(f"    {spk}: mic_ratio={ratio:.3f} ({label})")
 
-    # The speaker with the highest mic ratio is YOU
+    # The speaker with the highest mic ratio is YOU — but only if they
+    # are actually mic-dominant.  When no speaker exceeds the threshold
+    # (e.g. only system audio was captured), label everyone as REMOTE.
     you_speaker = max(speaker_mic_ratio, key=lambda s: speaker_mic_ratio[s])
 
-    # Build remapping: YOU speaker -> "YOU", others -> "REMOTE" or "REMOTE_1", etc.
-    remote_speakers = [s for s in sorted(speaker_mic_ratio) if s != you_speaker]
-    label_map: dict[str, str] = {you_speaker: "YOU"}
-    if len(remote_speakers) == 1:
-        label_map[remote_speakers[0]] = "REMOTE"
+    label_map: dict[str, str] = {}
+    if speaker_mic_ratio[you_speaker] > 0.5:
+        # At least one speaker is mic-dominant
+        label_map[you_speaker] = "YOU"
+        remote_speakers = [s for s in sorted(speaker_mic_ratio) if s != you_speaker]
+        if len(remote_speakers) == 1:
+            label_map[remote_speakers[0]] = "REMOTE"
+        else:
+            for i, spk in enumerate(remote_speakers):
+                label_map[spk] = f"REMOTE_{i + 1}"
     else:
-        for i, spk in enumerate(remote_speakers):
-            label_map[spk] = f"REMOTE_{i + 1}"
+        # No speaker is mic-dominant — label all as REMOTE
+        all_speakers = sorted(speaker_mic_ratio)
+        if len(all_speakers) == 1:
+            label_map[all_speakers[0]] = "REMOTE"
+        else:
+            for i, spk in enumerate(all_speakers):
+                label_map[spk] = f"REMOTE_{i + 1}"
 
     print(f"  Speaker labels: {label_map}")
 

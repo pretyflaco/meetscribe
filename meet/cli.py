@@ -58,8 +58,9 @@ def _drain_countdown(session, seconds: int = DRAIN_SECONDS) -> None:
         signal.signal(signal.SIGINT, prev_handler)
 
 
-def _generate_summary(transcript, out_dir, basename, summary_model, files,
-                      summary_backend=None):
+def _generate_summary(
+    transcript, out_dir, basename, summary_model, files, summary_backend=None
+):
     """Generate an AI meeting summary. Returns MeetingSummary or None.
 
     Supports multiple backends (claudemax, openrouter, ollama) via SummaryConfig.
@@ -78,10 +79,13 @@ def _generate_summary(transcript, out_dir, basename, summary_model, files,
     def _cli_progress(msg: str) -> None:
         click.echo(f"  {msg}")
 
-    click.echo(f"Generating meeting summary ({summary_config.model} via {summary_config.backend})...")
+    click.echo(
+        f"Generating meeting summary ({summary_config.model} via {summary_config.backend})..."
+    )
     try:
         result = do_summarize(
-            transcript.to_text(), summary_config,
+            transcript.to_text(),
+            summary_config,
             language=transcript.language,
             progress_callback=_cli_progress,
         )
@@ -100,8 +104,12 @@ def _generate_pdf(transcript, out_dir, basename, summary_result, files):
 
     pdf_path = out_dir / f"{basename}.pdf"
     try:
-        generate_pdf(transcript, pdf_path, summary=summary_result,
-                     language=getattr(transcript, "language", "en"))
+        generate_pdf(
+            transcript,
+            pdf_path,
+            summary=summary_result,
+            language=getattr(transcript, "language", "en"),
+        )
         files["pdf"] = pdf_path
     except Exception as exc:
         click.echo(f"  PDF generation failed: {exc}", err=True)
@@ -129,13 +137,17 @@ def _recording_loop(session) -> None:
             if status.failed and not warned_failed:
                 # Recording failed and could not restart
                 reason = status.fail_reason or "unknown error"
-                click.echo(f"\r\033[K\033[1;31m✖ RECORDING FAILED\033[0m  {elapsed}  {size}  — {reason}")
+                click.echo(
+                    f"\r\033[K\033[1;31m✖ RECORDING FAILED\033[0m  {elapsed}  {size}  — {reason}"
+                )
                 click.echo(f"  Press Ctrl+C to transcribe what was captured.")
                 warned_failed = True
             elif status.restart_count > last_restart_count:
                 # ffmpeg was restarted — show brief warning
                 last_restart_count = status.restart_count
-                click.echo(f"\r\033[K\033[1;33m⚠ Recording restarted\033[0m (attempt {status.restart_count})  {elapsed}  {size}")
+                click.echo(
+                    f"\r\033[K\033[1;33m⚠ Recording restarted\033[0m (attempt {status.restart_count})  {elapsed}  {size}"
+                )
             elif not warned_failed:
                 # Normal status line — overwrite in place
                 if status.is_alive:
@@ -159,16 +171,35 @@ def main():
 
 
 @main.command()
-@click.option("--output-dir", "-o", type=click.Path(), default=None,
-              help="Directory to save recordings (default: ~/meet-recordings)")
-@click.option("--filename", "-f", type=str, default=None,
-              help="Output filename (default: meeting-YYYYMMDD-HHMMSS.wav)")
-@click.option("--mic", type=str, default=None,
-              help="Mic source name (default: system default)")
-@click.option("--monitor", type=str, default=None,
-              help="Monitor source name (default: default sink monitor)")
-@click.option("--virtual-sink", is_flag=True, default=False,
-              help="Use a virtual sink for isolated capture")
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Directory to save recordings (default: ~/meet-recordings)",
+)
+@click.option(
+    "--filename",
+    "-f",
+    type=str,
+    default=None,
+    help="Output filename (default: meeting-YYYYMMDD-HHMMSS.wav)",
+)
+@click.option(
+    "--mic", type=str, default=None, help="Mic source name (default: system default)"
+)
+@click.option(
+    "--monitor",
+    type=str,
+    default=None,
+    help="Monitor source name (default: default sink monitor)",
+)
+@click.option(
+    "--virtual-sink",
+    is_flag=True,
+    default=False,
+    help="Use a virtual sink for isolated capture",
+)
 def record(output_dir, filename, mic, monitor, virtual_sink):
     """Record meeting audio. Press Ctrl+C to stop."""
     from meet.capture import create_session, check_prerequisites
@@ -193,7 +224,9 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
     click.echo(f"  Monitor source: {session.monitor_source}")
     click.echo(f"  Virtual sink:   {session.use_virtual_sink}")
     if virtual_sink:
-        click.echo(f"  NOTE: Route your meeting app's audio to 'Meet-Capture' in pavucontrol")
+        click.echo(
+            f"  NOTE: Route your meeting app's audio to 'Meet-Capture' in pavucontrol"
+        )
     click.echo()
 
     session.start()
@@ -210,7 +243,9 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
             click.echo(f"Transcribe with: meet transcribe {output}")
             status = session.status()
             if status.restart_count > 0:
-                click.echo(f"  Note: recording restarted {status.restart_count} time(s) — check .ffmpeg.log if audio seems off")
+                click.echo(
+                    f"  Note: recording restarted {status.restart_count} time(s) — check .ffmpeg.log if audio seems off"
+                )
         else:
             click.echo("Warning: output file was not created", err=True)
         sys.exit(0)
@@ -218,41 +253,117 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
 
 @main.command()
 @click.argument("audio_file", type=click.Path(exists=True))
-@click.option("--model", "-m", type=str, default="large-v3-turbo",
-              help="Whisper model (default: large-v3-turbo). Also: base, medium, large-v2, or a local path.")
-@click.option("--device", type=click.Choice(["cuda", "cpu"]), default="cuda",
-              help="Device to run on (default: cuda)")
-@click.option("--compute-type", type=str, default="float16",
-              help="Compute type: float16, int8 (default: float16)")
-@click.option("--batch-size", "-b", type=int, default=16,
-              help="Batch size for transcription (default: 16)")
-@click.option("--language", "-l", type=str, default="auto",
-              help="Language code or 'auto' to detect (default: auto). Examples: en, de, fr, es, tr, fa")
-@click.option("--hf-token", type=str, default=None, envvar="HF_TOKEN",
-              help="HuggingFace token for diarization (or set HF_TOKEN env var)")
-@click.option("--min-speakers", type=int, default=None,
-              help="Minimum number of speakers")
-@click.option("--max-speakers", type=int, default=None,
-              help="Maximum number of speakers")
-@click.option("--output-dir", "-o", type=click.Path(), default=None,
-              help="Output directory for transcripts (default: same as audio file)")
-@click.option("--no-diarize", is_flag=True, default=False,
-              help="Skip speaker diarization")
-@click.option("--summarize/--no-summarize", default=True,
-              help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
-              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
-@click.option("--summary-model", type=str, default=None,
-              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
-@click.option("--skip-alignment", is_flag=True, default=False,
-              help="Skip word-level alignment (useful if alignment model is unavailable)")
-def transcribe(audio_file, model, device, compute_type, batch_size,
-               language, hf_token, min_speakers, max_speakers, output_dir,
-               no_diarize, summarize, summary_backend, summary_model, skip_alignment):
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default="large-v3-turbo",
+    help="Whisper model (default: large-v3-turbo). Also: base, medium, large-v2, or a local path.",
+)
+@click.option(
+    "--device",
+    type=click.Choice(["cuda", "cpu"]),
+    default="cuda",
+    help="Device to run on (default: cuda)",
+)
+@click.option(
+    "--compute-type",
+    type=str,
+    default="float16",
+    help="Compute type: float16, int8 (default: float16)",
+)
+@click.option(
+    "--batch-size",
+    "-b",
+    type=int,
+    default=16,
+    help="Batch size for transcription (default: 16)",
+)
+@click.option(
+    "--language",
+    "-l",
+    type=str,
+    default="auto",
+    help="Language code or 'auto' to detect (default: auto). Examples: en, de, fr, es, tr, fa",
+)
+@click.option(
+    "--hf-token",
+    type=str,
+    default=None,
+    envvar="HF_TOKEN",
+    help="HuggingFace token for diarization (or set HF_TOKEN env var)",
+)
+@click.option(
+    "--min-speakers", type=int, default=None, help="Minimum number of speakers"
+)
+@click.option(
+    "--max-speakers", type=int, default=None, help="Maximum number of speakers"
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Output directory for transcripts (default: same as audio file)",
+)
+@click.option(
+    "--no-diarize", is_flag=True, default=False, help="Skip speaker diarization"
+)
+@click.option(
+    "--summarize/--no-summarize",
+    default=True,
+    help="Generate AI meeting summary (default: on)",
+)
+@click.option(
+    "--summary-backend",
+    type=click.Choice(
+        ["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False
+    ),
+    default=None,
+    help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)",
+)
+@click.option(
+    "--summary-model",
+    type=str,
+    default=None,
+    help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)",
+)
+@click.option(
+    "--skip-alignment",
+    is_flag=True,
+    default=False,
+    help="Skip word-level alignment (useful if alignment model is unavailable)",
+)
+@click.option(
+    "--mixdown",
+    type=click.Choice(["mic", "avg"]),
+    default="mic",
+    help="Stereo mixdown mode: mic=left channel only, avg=transcribe both channels separately (default: mic)",
+)
+def transcribe(
+    audio_file,
+    model,
+    device,
+    compute_type,
+    batch_size,
+    language,
+    hf_token,
+    min_speakers,
+    max_speakers,
+    output_dir,
+    no_diarize,
+    summarize,
+    summary_backend,
+    summary_model,
+    skip_alignment,
+    mixdown,
+):
     """Transcribe a recorded audio file with speaker diarization."""
     from meet.transcribe import (
-        TranscriptionConfig, transcribe as do_transcribe,
-        AlignmentModelMissing, ensure_gpu_available,
+        TranscriptionConfig,
+        transcribe as do_transcribe,
+        AlignmentModelMissing,
+        ensure_gpu_available,
     )
 
     audio_path = Path(audio_file)
@@ -263,7 +374,9 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
         oggs = sorted(audio_path.glob("*.ogg"))
         audio_files = wavs or oggs
         if not audio_files:
-            click.echo(f"Error: no audio file (.wav/.ogg) found in {audio_path}", err=True)
+            click.echo(
+                f"Error: no audio file (.wav/.ogg) found in {audio_path}", err=True
+            )
             raise SystemExit(1)
         audio_path = audio_files[0]
         click.echo(f"  Resolved to: {audio_path}")
@@ -278,13 +391,17 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         skip_alignment=skip_alignment,
+        mixdown=mixdown,
     )
 
     if not no_diarize and not config.hf_token:
         click.echo("Warning: No HF_TOKEN found. Diarization will be skipped.", err=True)
         click.echo("  Set HF_TOKEN env var or pass --hf-token", err=True)
         click.echo("  Get a token at: https://huggingface.co/settings/tokens", err=True)
-        click.echo("  Accept model terms at: https://huggingface.co/pyannote/speaker-diarization-community-1", err=True)
+        click.echo(
+            "  Accept model terms at: https://huggingface.co/pyannote/speaker-diarization-community-1",
+            err=True,
+        )
         click.echo()
 
     click.echo(f"Transcribing: {audio_path}")
@@ -306,8 +423,13 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
         click.echo(f"  To download it, run:", err=True)
         click.echo(f"    meet download {exc.lang}", err=True)
         click.echo(err=True)
-        click.echo(f"  Or skip alignment (fewer segments, no word-level timestamps):", err=True)
-        click.echo(f"    meet transcribe {audio_file} --language {exc.lang} --skip-alignment", err=True)
+        click.echo(
+            f"  Or skip alignment (fewer segments, no word-level timestamps):", err=True
+        )
+        click.echo(
+            f"    meet transcribe {audio_file} --language {exc.lang} --skip-alignment",
+            err=True,
+        )
         raise SystemExit(1)
 
     # Determine output directory
@@ -321,8 +443,14 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
     # ── Summary + PDF ──
     summary_result = None
     if summarize:
-        summary_result = _generate_summary(transcript, out_dir, audio_path.stem, summary_model, files,
-                                          summary_backend=summary_backend)
+        summary_result = _generate_summary(
+            transcript,
+            out_dir,
+            audio_path.stem,
+            summary_model,
+            files,
+            summary_backend=summary_backend,
+        )
 
     _generate_pdf(transcript, out_dir, audio_path.stem, summary_result, files)
 
@@ -348,10 +476,20 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
 
 
 @main.command()
-@click.option("--output-dir", "-o", type=click.Path(), default=None,
-              help="Directory for recordings and transcripts")
-@click.option("--model", "-m", type=str, default="large-v3-turbo",
-              help="Whisper model (default: large-v3-turbo)")
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Directory for recordings and transcripts",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default="large-v3-turbo",
+    help="Whisper model (default: large-v3-turbo)",
+)
 @click.option("--device", type=click.Choice(["cuda", "cpu"]), default="cuda")
 @click.option("--compute-type", type=str, default="float16")
 @click.option("--batch-size", "-b", type=int, default=16)
@@ -360,22 +498,61 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
 @click.option("--min-speakers", type=int, default=None)
 @click.option("--max-speakers", type=int, default=None)
 @click.option("--virtual-sink", is_flag=True, default=False)
-@click.option("--summarize/--no-summarize", default=True,
-              help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
-              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
-@click.option("--summary-model", type=str, default=None,
-              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
-@click.option("--skip-alignment", is_flag=True, default=False,
-              help="Skip word-level alignment (useful if alignment model is unavailable)")
-def run(output_dir, model, device, compute_type, batch_size,
-        language, hf_token, min_speakers, max_speakers, virtual_sink,
-        summarize, summary_backend, summary_model, skip_alignment):
+@click.option(
+    "--summarize/--no-summarize",
+    default=True,
+    help="Generate AI meeting summary (default: on)",
+)
+@click.option(
+    "--summary-backend",
+    type=click.Choice(
+        ["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False
+    ),
+    default=None,
+    help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)",
+)
+@click.option(
+    "--summary-model",
+    type=str,
+    default=None,
+    help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)",
+)
+@click.option(
+    "--skip-alignment",
+    is_flag=True,
+    default=False,
+    help="Skip word-level alignment (useful if alignment model is unavailable)",
+)
+@click.option(
+    "--mixdown",
+    type=click.Choice(["mic", "avg"]),
+    default="mic",
+    help="Stereo mixdown mode: mic=left channel only, avg=transcribe both channels separately (default: mic)",
+)
+def run(
+    output_dir,
+    model,
+    device,
+    compute_type,
+    batch_size,
+    language,
+    hf_token,
+    min_speakers,
+    max_speakers,
+    virtual_sink,
+    summarize,
+    summary_backend,
+    summary_model,
+    skip_alignment,
+    mixdown,
+):
     """Record a meeting, then transcribe when stopped with Ctrl+C."""
     from meet.capture import create_session, check_prerequisites
     from meet.transcribe import (
-        TranscriptionConfig, transcribe as do_transcribe,
-        AlignmentModelMissing, ensure_gpu_available,
+        TranscriptionConfig,
+        transcribe as do_transcribe,
+        AlignmentModelMissing,
+        ensure_gpu_available,
     )
 
     issues = check_prerequisites()
@@ -400,6 +577,7 @@ def run(output_dir, model, device, compute_type, batch_size,
         min_speakers=min_speakers,
         max_speakers=max_speakers,
         skip_alignment=skip_alignment,
+        mixdown=mixdown,
     )
 
     if not config.hf_token:
@@ -430,7 +608,9 @@ def run(output_dir, model, device, compute_type, batch_size,
         rec_status = session.status()
         click.echo(f"Saved recording: {output} ({size_mb:.1f} MB)")
         if rec_status.restart_count > 0:
-            click.echo(f"  Note: recording restarted {rec_status.restart_count} time(s)")
+            click.echo(
+                f"  Note: recording restarted {rec_status.restart_count} time(s)"
+            )
         click.echo()
         click.echo("Starting transcription...")
         click.echo()
@@ -448,7 +628,10 @@ def run(output_dir, model, device, compute_type, batch_size,
             click.echo(f"    meet download {exc.lang}", err=True)
             click.echo(err=True)
             click.echo(f"  Or re-run with --skip-alignment:", err=True)
-            click.echo(f"    meet transcribe {output} --language {exc.lang} --skip-alignment", err=True)
+            click.echo(
+                f"    meet transcribe {output} --language {exc.lang} --skip-alignment",
+                err=True,
+            )
             click.echo(err=True)
             click.echo(f"  Your recording is saved at: {output}", err=True)
             sys.exit(1)
@@ -457,14 +640,22 @@ def run(output_dir, model, device, compute_type, batch_size,
         # ── Summary + PDF ──
         summary_result = None
         if summarize:
-            summary_result = _generate_summary(transcript, output.parent, output.stem, summary_model, files,
-                                              summary_backend=summary_backend)
+            summary_result = _generate_summary(
+                transcript,
+                output.parent,
+                output.stem,
+                summary_model,
+                files,
+                summary_backend=summary_backend,
+            )
 
         _generate_pdf(transcript, output.parent, output.stem, summary_result, files)
 
         click.echo()
         click.echo(f"Done!")
-        click.echo(f"  Duration: {transcript.duration:.0f}s" if transcript.duration else "")
+        click.echo(
+            f"  Duration: {transcript.duration:.0f}s" if transcript.duration else ""
+        )
         click.echo(f"  Speakers: {len(transcript.speakers)}")
         click.echo(f"  Segments: {len(transcript.segments)}")
         click.echo()
@@ -532,12 +723,14 @@ def check():
     click.echo()
     try:
         import whisperx
+
         click.echo(f"  whisperx:         OK")
     except ImportError:
         click.echo(f"  whisperx:         NOT INSTALLED (pip install whisperx)")
 
     try:
         import torch
+
         cuda_available = torch.cuda.is_available()
         if cuda_available:
             gpu_name = torch.cuda.get_device_name(0)
@@ -549,6 +742,7 @@ def check():
 
     # Check HF token
     import os
+
     hf_token = os.environ.get("HF_TOKEN")
     if not hf_token:
         token_path = Path.home() / ".cache" / "huggingface" / "token"
@@ -569,8 +763,13 @@ def check():
 
 @main.command()
 @click.argument("languages", nargs=-1)
-@click.option("--all", "download_all", is_flag=True, default=False,
-              help="Download alignment models for all supported languages")
+@click.option(
+    "--all",
+    "download_all",
+    is_flag=True,
+    default=False,
+    help="Download alignment models for all supported languages",
+)
 def download(languages, download_all):
     """Download alignment models for specified languages.
 
@@ -596,8 +795,14 @@ def download(languages, download_all):
         click.echo(f"  {'Lang':<6} {'Name':<10} {'Model':<50} {'Size':<10} {'Status'}")
         click.echo(f"  {'----':<6} {'----':<10} {'-----':<50} {'----':<10} {'------'}")
         for lang, details in info.items():
-            status = click.style("cached", fg="green") if details["cached"] else click.style("missing", fg="red")
-            click.echo(f"  {lang:<6} {details['name']:<10} {details['model']:<50} {details['size']:<10} {status}")
+            status = (
+                click.style("cached", fg="green")
+                if details["cached"]
+                else click.style("missing", fg="red")
+            )
+            click.echo(
+                f"  {lang:<6} {details['name']:<10} {details['model']:<50} {details['size']:<10} {status}"
+            )
         click.echo()
         click.echo("To download: meet download <lang> [<lang> ...]")
         click.echo("To download all: meet download --all")
@@ -618,17 +823,30 @@ def download(languages, download_all):
             click.echo(f"  {details['name']} ({lang}): already cached, skipping.")
             continue
         try:
-            download_alignment_model(lang, progress_callback=lambda msg: click.echo(f"  {msg}"))
+            download_alignment_model(
+                lang, progress_callback=lambda msg: click.echo(f"  {msg}")
+            )
         except Exception as exc:
-            click.echo(f"  Error downloading {details['name']} ({lang}): {exc}", err=True)
+            click.echo(
+                f"  Error downloading {details['name']} ({lang}): {exc}", err=True
+            )
 
 
 @main.command()
 @click.argument("session_dir", type=click.Path(exists=True))
-@click.option("--to", "target_lang", type=str, default="en",
-              help="Target language for translation (default: en)")
-@click.option("--summary-model", type=str, default=None,
-              help="Ollama model to use (default: qwen3.5:9b)")
+@click.option(
+    "--to",
+    "target_lang",
+    type=str,
+    default="en",
+    help="Target language for translation (default: en)",
+)
+@click.option(
+    "--summary-model",
+    type=str,
+    default=None,
+    help="Ollama model to use (default: qwen3.5:9b)",
+)
 def translate(session_dir, target_lang, summary_model):
     """Translate a session's transcript to another language.
 
@@ -676,6 +894,7 @@ def translate(session_dir, target_lang, summary_model):
         raise SystemExit(1)
 
     from meet.languages import LANG_NAMES
+
     target_name = LANG_NAMES.get(target_lang, target_lang)
 
     click.echo(f"Translating: {txt_file}")
@@ -685,9 +904,11 @@ def translate(session_dir, target_lang, summary_model):
 
     # Free GPU memory from Ollama models that might be loaded
     from meet.transcribe import ensure_gpu_available
+
     ensure_gpu_available()
 
     import time as _time
+
     t0 = _time.time()
 
     payload = {
@@ -749,14 +970,32 @@ def translate(session_dir, target_lang, summary_model):
 
 @main.command()
 @click.argument("session_dir", type=click.Path(exists=True))
-@click.option("--no-audio", is_flag=True, default=False,
-              help="Skip audio playback (just show text samples)")
-@click.option("--no-summary", is_flag=True, default=False,
-              help="Skip summary regeneration (use find-and-replace on existing summary)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
-              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
-@click.option("--summary-model", type=str, default=None,
-              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
+@click.option(
+    "--no-audio",
+    is_flag=True,
+    default=False,
+    help="Skip audio playback (just show text samples)",
+)
+@click.option(
+    "--no-summary",
+    is_flag=True,
+    default=False,
+    help="Skip summary regeneration (use find-and-replace on existing summary)",
+)
+@click.option(
+    "--summary-backend",
+    type=click.Choice(
+        ["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False
+    ),
+    default=None,
+    help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)",
+)
+@click.option(
+    "--summary-model",
+    type=str,
+    default=None,
+    help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)",
+)
 def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
     """Assign real names to speakers in a transcribed session.
 
@@ -777,7 +1016,10 @@ def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
         meet label ~/meet-recordings/meeting-20260313-214133 --no-summary
     """
     from meet.label import (
-        get_speakers, extract_speaker_clip, play_clip, apply_labels,
+        get_speakers,
+        extract_speaker_clip,
+        play_clip,
+        apply_labels,
         _find_session_files,
     )
 
@@ -810,10 +1052,14 @@ def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
     click.echo()
 
     # Show summary table
-    click.echo(f"  {'#':<4} {'Label':<14} {'Channel':<10} {'Segments':<10} {'Sample Text'}")
-    click.echo(f"  {'─'*4} {'─'*14} {'─'*10} {'─'*10} {'─'*40}")
+    click.echo(
+        f"  {'#':<4} {'Label':<14} {'Channel':<10} {'Segments':<10} {'Sample Text'}"
+    )
+    click.echo(f"  {'─' * 4} {'─' * 14} {'─' * 10} {'─' * 10} {'─' * 40}")
     for i, sp in enumerate(speakers, 1):
-        click.echo(f"  {i:<4} {sp.id:<14} {sp.channel:<10} {sp.segment_count:<10} {sp.sample_text[:40]}")
+        click.echo(
+            f"  {i:<4} {sp.id:<14} {sp.channel:<10} {sp.segment_count:<10} {sp.sample_text[:40]}"
+        )
     click.echo()
 
     # Find WAV for audio playback
@@ -832,7 +1078,7 @@ def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
         for i, sp in enumerate(speakers, 1):
             click.echo(f"Speaker {i}/{len(speakers)}: {click.style(sp.id, bold=True)}")
             click.echo(f"  Channel: {sp.channel}  |  Segments: {sp.segment_count}")
-            click.echo(f"  Sample:  \"{sp.sample_text}\"")
+            click.echo(f'  Sample:  "{sp.sample_text}"')
 
             # Play audio clip
             if can_play:
@@ -849,7 +1095,8 @@ def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
             # Prompt for name
             new_name = click.prompt(
                 f"  Enter name for {sp.id} (Enter to keep)",
-                default="", show_default=False,
+                default="",
+                show_default=False,
             ).strip()
 
             if new_name and new_name != sp.id:
@@ -896,8 +1143,13 @@ def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
 
 @main.command()
 @click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
-@click.option("--list", "list_profiles", is_flag=True, default=False,
-              help="List enrolled speaker profiles and exit")
+@click.option(
+    "--list",
+    "list_profiles",
+    is_flag=True,
+    default=False,
+    help="List enrolled speaker profiles and exit",
+)
 def enroll(session_dirs, list_profiles):
     """Enroll speaker voice profiles from labeled session directories.
 
@@ -928,7 +1180,9 @@ def enroll(session_dirs, list_profiles):
         return
 
     if not session_dirs:
-        click.echo("Error: provide at least one session directory, or use --list", err=True)
+        click.echo(
+            "Error: provide at least one session directory, or use --list", err=True
+        )
         raise SystemExit(1)
 
     total_enrolled = 0
@@ -964,14 +1218,30 @@ def enroll(session_dirs, list_profiles):
 
 @main.command()
 @click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
-@click.option("--force", is_flag=True, default=False,
-              help="Push even if the meeting doesn't match a scheduled meeting")
-@click.option("--meeting-type", type=str, default=None,
-              help="Override meeting type folder (e.g. 'weekly-sync', 'dev-standup')")
-@click.option("--list-schedule", is_flag=True, default=False,
-              help="Show the current sync schedule and exit")
-@click.option("--init-config", is_flag=True, default=False,
-              help="Create an example sync config and exit")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Push even if the meeting doesn't match a scheduled meeting",
+)
+@click.option(
+    "--meeting-type",
+    type=str,
+    default=None,
+    help="Override meeting type folder (e.g. 'weekly-sync', 'dev-standup')",
+)
+@click.option(
+    "--list-schedule",
+    is_flag=True,
+    default=False,
+    help="Show the current sync schedule and exit",
+)
+@click.option(
+    "--init-config",
+    is_flag=True,
+    default=False,
+    help="Create an example sync config and exit",
+)
 def sync(session_dirs, force, meeting_type, list_schedule, init_config):
     """Sync meeting artifacts to a configured Git repository.
 
@@ -991,10 +1261,15 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
         meet sync --list-schedule
     """
     from meet.sync import (
-        detect_meeting_type, sync_session, load_sync_config,
-        save_sync_config, is_sync_configured,
-        MeetingMatch, ensure_repo_cloned,
-        SYNC_CONFIG_PATH, EXAMPLE_CONFIG,
+        detect_meeting_type,
+        sync_session,
+        load_sync_config,
+        save_sync_config,
+        is_sync_configured,
+        MeetingMatch,
+        ensure_repo_cloned,
+        SYNC_CONFIG_PATH,
+        EXAMPLE_CONFIG,
     )
 
     if init_config:
@@ -1030,7 +1305,9 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
                 click.echo(f"  {m['name']}")
                 click.echo(f"    folder:  meetings/{m['folder']}/")
                 click.echo(f"    days:    {days}")
-                click.echo(f"    time:    {m['hour_utc']:02d}:00 UTC ±{m.get('window_minutes', 60)} min")
+                click.echo(
+                    f"    time:    {m['hour_utc']:02d}:00 UTC ±{m.get('window_minutes', 60)} min"
+                )
                 click.echo()
         return
 
@@ -1068,7 +1345,8 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
 
         try:
             files = sync_session(
-                session_path, match,
+                session_path,
+                match,
                 progress_callback=lambda msg: click.echo(msg),
             )
             click.echo(f"  Done: {len(files)} file(s) pushed as {match.folder}/")
@@ -1079,12 +1357,24 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
 
 @main.command()
 @click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
-@click.option("--older-than", type=int, default=None,
-              help="Only compress sessions older than N days")
-@click.option("--keep-wav", is_flag=True, default=False,
-              help="Keep original WAV files after compression")
-@click.option("--dry-run", is_flag=True, default=False,
-              help="Show what would be compressed without doing it")
+@click.option(
+    "--older-than",
+    type=int,
+    default=None,
+    help="Only compress sessions older than N days",
+)
+@click.option(
+    "--keep-wav",
+    is_flag=True,
+    default=False,
+    help="Keep original WAV files after compression",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be compressed without doing it",
+)
 def archive(session_dirs, older_than, keep_wav, dry_run):
     """Compress session WAV files to OGG/Opus to save disk space.
 
@@ -1137,8 +1427,9 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
 
     # Compute totals.
     total_wav_size = sum(w.stat().st_size for w in targets)
-    click.echo(f"Found {len(targets)} WAV file(s) totaling "
-               f"{total_wav_size / 1_048_576:.1f} MB")
+    click.echo(
+        f"Found {len(targets)} WAV file(s) totaling {total_wav_size / 1_048_576:.1f} MB"
+    )
 
     if dry_run:
         click.echo()
@@ -1148,8 +1439,10 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
         # Estimate: Opus at 48 kbps ~= 0.36 MB/min; WAV at 16kHz stereo = 3.84 MB/min
         estimated_ratio = 10.5
         estimated_ogg = total_wav_size / estimated_ratio
-        click.echo(f"\n  Estimated compressed size: ~{estimated_ogg / 1_048_576:.0f} MB "
-                   f"(~{estimated_ratio:.0f}x reduction)")
+        click.echo(
+            f"\n  Estimated compressed size: ~{estimated_ogg / 1_048_576:.0f} MB "
+            f"(~{estimated_ratio:.0f}x reduction)"
+        )
         return
 
     # Compress each file.
@@ -1158,7 +1451,9 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
     for wav in targets:
         label = f"{wav.parent.name}/{wav.name}"
         wav_size = wav.stat().st_size
-        click.echo(f"  Compressing {label} ({wav_size / 1_048_576:.1f} MB)...", nl=False)
+        click.echo(
+            f"  Compressing {label} ({wav_size / 1_048_576:.1f} MB)...", nl=False
+        )
         try:
             ogg_path = compress_audio(wav, keep_wav=keep_wav)
             ogg_size = ogg_path.stat().st_size
@@ -1170,15 +1465,27 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
         except Exception as exc:
             click.echo(f" FAILED: {exc}", err=True)
 
-    click.echo(f"\nDone: {compressed_count}/{len(targets)} files compressed, "
-               f"{saved_bytes / 1_048_576:.0f} MB saved")
+    click.echo(
+        f"\nDone: {compressed_count}/{len(targets)} files compressed, "
+        f"{saved_bytes / 1_048_576:.0f} MB saved"
+    )
 
 
 @main.command()
-@click.option("--output-dir", "-o", type=click.Path(), default=None,
-              help="Directory for recordings and transcripts")
-@click.option("--model", "-m", type=str, default="large-v3-turbo",
-              help="Whisper model (default: large-v3-turbo)")
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Directory for recordings and transcripts",
+)
+@click.option(
+    "--model",
+    "-m",
+    type=str,
+    default="large-v3-turbo",
+    help="Whisper model (default: large-v3-turbo)",
+)
 @click.option("--device", type=click.Choice(["cuda", "cpu"]), default="cuda")
 @click.option("--compute-type", type=str, default="float16")
 @click.option("--batch-size", "-b", type=int, default=16)
@@ -1187,19 +1494,51 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
 @click.option("--min-speakers", type=int, default=None)
 @click.option("--max-speakers", type=int, default=None)
 @click.option("--virtual-sink", is_flag=True, default=False)
-@click.option("--mic", type=str, default=None,
-              help="Mic source name (default: system default)")
-@click.option("--monitor", type=str, default=None,
-              help="Monitor source name (default: default sink monitor)")
-@click.option("--summarize/--no-summarize", default=True,
-              help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
-              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
-@click.option("--summary-model", type=str, default=None,
-              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
-def gui(output_dir, model, device, compute_type, batch_size,
-        language, hf_token, min_speakers, max_speakers, virtual_sink,
-        mic, monitor, summarize, summary_backend, summary_model):
+@click.option(
+    "--mic", type=str, default=None, help="Mic source name (default: system default)"
+)
+@click.option(
+    "--monitor",
+    type=str,
+    default=None,
+    help="Monitor source name (default: default sink monitor)",
+)
+@click.option(
+    "--summarize/--no-summarize",
+    default=True,
+    help="Generate AI meeting summary (default: on)",
+)
+@click.option(
+    "--summary-backend",
+    type=click.Choice(
+        ["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False
+    ),
+    default=None,
+    help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)",
+)
+@click.option(
+    "--summary-model",
+    type=str,
+    default=None,
+    help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)",
+)
+def gui(
+    output_dir,
+    model,
+    device,
+    compute_type,
+    batch_size,
+    language,
+    hf_token,
+    min_speakers,
+    max_speakers,
+    virtual_sink,
+    mic,
+    monitor,
+    summarize,
+    summary_backend,
+    summary_model,
+):
     """Launch the GUI recording widget."""
     from meet.gui import launch
 
