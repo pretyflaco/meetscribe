@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from unittest.mock import patch
+
 from meet.transcribe import Segment, Speaker, Transcript, TranscriptionConfig, _fmt_time, _fmt_srt_time
+from meet.transcribe import transcribe as do_transcribe
 
 
 # ─── Transcript.to_text() ──────────────────────────────────────────────────
@@ -235,3 +238,29 @@ class TestTranscriptionConfig:
     def test_invalid_mixdown_raises(self):
         with pytest.raises(ValueError, match="Invalid mixdown mode"):
             TranscriptionConfig(mixdown="stereo")
+
+
+# ─── Dual-channel dispatch ────────────────────────────────────────────────
+
+class TestDualChannelDispatch:
+    def test_dual_mixdown_dispatches_to_dual_channel(self, stereo_wav):
+        """Stereo audio with mixdown='dual' should call _transcribe_dual_channel."""
+        dummy = Transcript(
+            segments=[], speakers=[], language="en",
+            audio_file=str(stereo_wav), duration=5.0,
+        )
+        with patch("meet.transcribe._transcribe_dual_channel", return_value=dummy) as mock_dual:
+            config = TranscriptionConfig(mixdown="dual")
+            result = do_transcribe(str(stereo_wav), config)
+            mock_dual.assert_called_once()
+            assert result is dummy
+
+    def test_mono_mixdown_does_not_dispatch_to_dual_channel(self, stereo_wav):
+        """Stereo audio with mixdown='mono' should NOT call _transcribe_dual_channel."""
+        with patch("meet.transcribe._transcribe_dual_channel") as mock_dual:
+            config = TranscriptionConfig(mixdown="mono")
+            try:
+                do_transcribe(str(stereo_wav), config)
+            except Exception:
+                pass  # Full pipeline needs GPU/models — we only care about dispatch
+            mock_dual.assert_not_called()
