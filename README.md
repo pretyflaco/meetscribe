@@ -288,10 +288,20 @@ meetscribe supports three backends with automatic fallback:
 | `ollama` (default) | `ollama serve` + `ollama pull qwen3.5:9b` | Free | Good |
 | `openrouter` | Set `OPENROUTER_API_KEY` | Pay-per-use | Excellent |
 | `claudemax` | Run claude-max-api-proxy on localhost:3457 | Claude Max subscription | Excellent |
+| `openai` | Set `MEETSCRIBE_OPENAI_BASE_URL` | Varies | Varies |
+
+The `openai` backend works with any OpenAI-compatible API — Lemonade, LiteLLM,
+vLLM, text-generation-webui, LocalAI, or any self-hosted endpoint.
 
 ```bash
-# Use a specific backend
+# Use OpenRouter
 meet run --summary-backend openrouter --summary-model anthropic/claude-sonnet-4.6
+
+# Use any OpenAI-compatible endpoint
+export MEETSCRIBE_SUMMARY_BACKEND=openai
+export MEETSCRIBE_OPENAI_BASE_URL=http://localhost:8000/v1
+export MEETSCRIBE_SUMMARY_MODEL=your-model-name
+# Optional: export MEETSCRIBE_OPENAI_API_KEY=your-key
 
 # Or set via environment variables
 export MEETSCRIBE_SUMMARY_BACKEND=openrouter

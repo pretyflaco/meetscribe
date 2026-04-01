@@ -43,10 +43,14 @@ DEFAULT_CLAUDEMAX_MODEL = "claude-sonnet-4-6"
 CLAUDEMAX_BASE_URL = "http://localhost:3457/v1"
 CLAUDEMAX_HEALTH_URL = "http://localhost:3457/health"
 
+# OpenAI-compatible generic endpoint defaults
+DEFAULT_OPENAI_COMPAT_MODEL = "gpt-4o-mini"
+
 # Supported backends
-BACKENDS = ("ollama", "openrouter", "claudemax")
+BACKENDS = ("ollama", "openrouter", "claudemax", "openai")
 
 # Fallback order: try claudemax first, then openrouter, then ollama
+# (openai is not in fallback — it's opt-in only via explicit config)
 FALLBACK_ORDER = ("claudemax", "openrouter", "ollama")
 
 # Backward-compatible aliases (referenced by translate command, etc.)
@@ -163,6 +167,8 @@ def _resolve_model(backend: str) -> str:
         return DEFAULT_OPENROUTER_MODEL
     if backend == "claudemax":
         return DEFAULT_CLAUDEMAX_MODEL
+    if backend == "openai":
+        return DEFAULT_OPENAI_COMPAT_MODEL
     return DEFAULT_OLLAMA_MODEL
 
 
@@ -286,6 +292,8 @@ def is_backend_available(config: SummaryConfig | None = None) -> bool:
         return is_claudemax_available()
     elif config.backend == "openrouter":
         return bool(os.environ.get("OPENROUTER_API_KEY"))
+    elif config.backend == "openai":
+        return bool(os.environ.get("MEETSCRIBE_OPENAI_BASE_URL"))
     else:
         return is_ollama_available(config.ollama_url)
 
@@ -301,6 +309,11 @@ def _backend_not_available_message(config: SummaryConfig) -> str:
         return (
             "OPENROUTER_API_KEY is not set. "
             "Export it or use --summary-backend ollama."
+        )
+    if config.backend == "openai":
+        return (
+            "MEETSCRIBE_OPENAI_BASE_URL is not set. "
+            "Export it with the base URL of your OpenAI-compatible API."
         )
     return (
         f"Ollama is not running at {config.ollama_url}. "
@@ -522,6 +535,68 @@ def _summarize_claudemax(
     )
 
 
+# ─── Generic OpenAI-compatible backend ────────────────────────────────────
+
+def _summarize_openai(
+    system_prompt: str,
+    user_prompt: str,
+    config: SummaryConfig,
+) -> MeetingSummary:
+    """Send a summarization request to any OpenAI-compatible API endpoint.
+
+    Configured via environment variables:
+        MEETSCRIBE_OPENAI_BASE_URL  — required (e.g. http://localhost:8000/v1)
+        MEETSCRIBE_OPENAI_API_KEY   — optional (defaults to "not-needed")
+    """
+    import time
+
+    base_url = os.environ.get("MEETSCRIBE_OPENAI_BASE_URL")
+    if not base_url:
+        raise RuntimeError(
+            "MEETSCRIBE_OPENAI_BASE_URL environment variable is not set. "
+            "Set it to the base URL of your OpenAI-compatible API."
+        )
+
+    api_key = os.environ.get("MEETSCRIBE_OPENAI_API_KEY", "not-needed")
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+    )
+
+    t0 = time.time()
+
+    try:
+        response = client.chat.completions.create(
+            model=config.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=config.temperature,
+            timeout=config.timeout,
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenAI-compatible API error ({base_url}): {e}")
+
+    elapsed = time.time() - t0
+    content = (response.choices[0].message.content or "").strip()
+
+    if not content:
+        raise RuntimeError(
+            f"OpenAI-compatible API returned an empty response for model '{config.model}'."
+        )
+
+    return MeetingSummary(
+        markdown=content,
+        model=config.model,
+        elapsed_seconds=elapsed,
+        backend="openai",
+    )
+
+
 # ─── Response validation ──────────────────────────────────────────────────
 
 # Patterns that indicate the "summary" is actually an error response from
@@ -584,6 +659,8 @@ def _dispatch(
         result = _summarize_claudemax(system_prompt, user_prompt, fallback_config)
     elif backend == "openrouter":
         result = _summarize_openrouter(system_prompt, user_prompt, fallback_config)
+    elif backend == "openai":
+        result = _summarize_openai(system_prompt, user_prompt, fallback_config)
     else:
         result = _summarize_ollama(system_prompt, user_prompt, fallback_config)
 

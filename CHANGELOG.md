@@ -4,12 +4,16 @@
 
 ### New features
 
-- **Multi-backend summarization** — supports three backends with automatic
+- **Multi-backend summarization** — supports four backends with automatic
   fallback: `claudemax` (Claude Max API Proxy), `openrouter` (OpenRouter API),
-  and `ollama` (local). If the configured backend is unavailable, meetscribe
-  automatically tries the next one. Use `--summary-backend` and
-  `--summary-model` flags, or set `MEETSCRIBE_SUMMARY_BACKEND` /
-  `MEETSCRIBE_SUMMARY_MODEL` env vars.
+  `openai` (any OpenAI-compatible endpoint), and `ollama` (local). If the
+  configured backend is unavailable, meetscribe automatically tries the next
+  one. Use `--summary-backend` and `--summary-model` flags, or set
+  `MEETSCRIBE_SUMMARY_BACKEND` / `MEETSCRIBE_SUMMARY_MODEL` env vars.
+
+- **Generic OpenAI-compatible backend** — use any OpenAI-compatible API for
+  summarization (Lemonade, LiteLLM, vLLM, LocalAI, self-hosted endpoints).
+  Set `MEETSCRIBE_OPENAI_BASE_URL` and optionally `MEETSCRIBE_OPENAI_API_KEY`.
 
 - **Voiceprint speaker recognition** — automatically identifies speakers across
   meetings using voice embeddings. After labeling a meeting, speaker profiles

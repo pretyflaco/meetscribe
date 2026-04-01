@@ -240,7 +240,7 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
               help="Skip speaker diarization")
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
               default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
               help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
@@ -362,7 +362,7 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
 @click.option("--virtual-sink", is_flag=True, default=False)
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
               default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
               help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
@@ -753,7 +753,7 @@ def translate(session_dir, target_lang, summary_model):
               help="Skip audio playback (just show text samples)")
 @click.option("--no-summary", is_flag=True, default=False,
               help="Skip summary regeneration (use find-and-replace on existing summary)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
               default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
               help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
@@ -1193,7 +1193,7 @@ def archive(session_dirs, older_than, keep_wav, dry_run):
               help="Monitor source name (default: default sink monitor)")
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
-@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax", "openai"], case_sensitive=False),
               default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
               help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
