@@ -184,12 +184,14 @@ class _State:
 class MeetRecorderWindow(Gtk.Window):
 
     def __init__(self, capture_kwargs: dict, transcribe_kwargs: dict,
-                 summarize: bool = True, summary_model: str | None = None):
+                 summarize: bool = True, summary_backend: str | None = None,
+                 summary_model: str | None = None):
         super().__init__(title="Meet Recorder")
 
         self._capture_kwargs = capture_kwargs
         self._transcribe_kwargs = transcribe_kwargs
         self._summarize = summarize
+        self._summary_backend = summary_backend
         self._summary_model = summary_model
         self._session = None
         self._state = _State.IDLE
@@ -210,6 +212,9 @@ class MeetRecorderWindow(Gtk.Window):
         self._label_speakers: list = []  # SpeakerInfo list, set by worker
         self._label_entries: list = []   # Gtk.Entry widgets
         self._label_temp_clips: list[Path] = []  # temp WAV files for cleanup
+        self._label_auto_matches: dict = {}  # speaker_id -> SpeakerMatch, set by worker
+        self._label_channel_map: dict = {}   # speaker_id -> 'mic'|'system', set by worker
+        self._label_audio_path: Path | None = None  # audio file for profile update
 
         # Window properties
         self.set_default_size(300, 150)
@@ -394,6 +399,15 @@ class MeetRecorderWindow(Gtk.Window):
         self.set_resizable(False)
         self._label_event.set()
 
+        # Update voice profiles in background with confirmed labels
+        if self._label_result and self._label_audio_path:
+            import threading as _threading
+            _threading.Thread(
+                target=self._update_voice_profiles,
+                args=(self._label_result,),
+                daemon=True,
+            ).start()
+
     def _on_label_skip(self, _widget):
         """User clicked 'Skip' on the speaker labeling dialog."""
         self._label_result = None
@@ -421,12 +435,47 @@ class MeetRecorderWindow(Gtk.Window):
                 pass
         self._label_temp_clips.clear()
 
-    def _build_label_rows(self, speakers, wav_path):
+    def _update_voice_profiles(self, confirmed_label_map: dict):
+        """Background task: update voice profiles with confirmed speaker labels."""
+        if not self._label_audio_path or not confirmed_label_map:
+            return
+        try:
+            from meet.voiceprint import update_profiles_from_confirmed_labels
+            # We need the original (pre-relabel) segments, stored on the transcript
+            # that was passed to _do_label_speakers.  Retrieve from the saved JSON.
+            from meet.label import _find_session_files, _load_transcript
+            files = _find_session_files(self._label_audio_path.parent)
+            transcript_json = files.get("json")
+            if not transcript_json or not transcript_json.exists():
+                return
+            transcript = _load_transcript(transcript_json)
+            update_profiles_from_confirmed_labels(
+                self._label_audio_path,
+                transcript.segments,
+                confirmed_label_map,
+                self._label_channel_map,
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Voice profile update failed: %s", exc
+            )
+
+    def _build_label_rows(self, speakers, wav_path, auto_matches=None):
         """Build the per-speaker label rows in the GTK label dialog.
 
         Called from GTK main thread via GLib.idle_add.
+
+        Args:
+            speakers: List of SpeakerInfo objects.
+            wav_path: Path to audio for clip playback.
+            auto_matches: Optional dict of speaker_id -> SpeakerMatch with
+                          auto-recognized names and confidence scores.
         """
         from meet.label import extract_speaker_clip
+
+        if auto_matches is None:
+            auto_matches = {}
 
         # Clear previous rows
         for child in self._label_rows_box.get_children():
@@ -443,14 +492,20 @@ class MeetRecorderWindow(Gtk.Window):
             id_label.set_xalign(1.0)
             row.pack_start(id_label, False, False, 0)
 
-            # Text entry for new name
+            # Text entry for new name — pre-fill if auto-recognized
             entry = Gtk.Entry()
-            entry.set_placeholder_text(sp.id)
+            match = auto_matches.get(sp.id)
+            if match:
+                entry.set_text(match.name)
+                pct = int(match.confidence * 100)
+                entry.set_tooltip_text(f"Auto-recognized: {match.name} ({pct}% confidence)")
+            else:
+                entry.set_placeholder_text(sp.id)
             entry.set_width_chars(14)
             row.pack_start(entry, True, True, 0)
             self._label_entries.append(entry)
 
-            # Play button (if WAV available)
+            # Play button (if audio available)
             if wav_path and wav_path.exists():
                 try:
                     clip_path = extract_speaker_clip(wav_path, sp)
@@ -563,6 +618,7 @@ class MeetRecorderWindow(Gtk.Window):
         transcript.save(output.parent, basename=output.stem)
 
         self._do_post_process(output, transcript)
+        self._do_sync(output)
         GLib.idle_add(self._set_state, _State.DONE)
 
     def _do_drain(self):
@@ -716,14 +772,52 @@ class MeetRecorderWindow(Gtk.Window):
 
             spk_infos = _get_speakers(output.parent)
             if spk_infos:
-                wav_path = find_session_files(output.parent).get("wav")
+                session_files = find_session_files(output.parent)
+                wav_path = session_files.get("wav")
+
+                # Build channel map: speaker_id -> 'mic' | 'system'
+                from meet.audio import read_stereo_channels, compute_speaker_channel_energy
+                channel_map: dict[str, str] = {}
+                if wav_path and wav_path.exists():
+                    stereo = read_stereo_channels(wav_path)
+                    if stereo is not None:
+                        mic_ratio = compute_speaker_channel_energy(
+                            stereo.mic, stereo.system, transcript.segments, stereo.sample_rate
+                        )
+                        for spk_id, ratio in mic_ratio.items():
+                            channel_map[spk_id] = "mic" if ratio > 0.5 else "system"
+
+                # Run voice identification against profile database
+                auto_matches: dict = {}
+                if wav_path and wav_path.exists():
+                    try:
+                        from meet.voiceprint import identify_speakers
+                        auto_matches = identify_speakers(
+                            wav_path,
+                            transcript.segments,
+                            transcript.speakers,
+                            channel_map,
+                        )
+                    except Exception as exc:
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            "Voice identification failed: %s", exc
+                        )
+
                 self._label_speakers = spk_infos
+                self._label_auto_matches = auto_matches
+                self._label_channel_map = channel_map
+                self._label_audio_path = wav_path
 
                 self._label_event.clear()
                 self._label_result = None
 
-                def _show_label_dialog():
-                    self._build_label_rows(spk_infos, wav_path)
+                def _show_label_dialog(
+                    _spk_infos=spk_infos,
+                    _wav_path=wav_path,
+                    _auto_matches=auto_matches,
+                ):
+                    self._build_label_rows(_spk_infos, _wav_path, _auto_matches)
                     self._set_state(_State.LABELING_SPEAKERS)
 
                 GLib.idle_add(_show_label_dialog)
@@ -734,7 +828,7 @@ class MeetRecorderWindow(Gtk.Window):
                         transcript, self._label_result,
                     )
                     import json as _json
-                    session_json = find_session_files(output.parent).get("session")
+                    session_json = session_files.get("session")
                     if session_json and session_json.exists():
                         try:
                             meta = _json.loads(session_json.read_text(encoding="utf-8"))
@@ -760,10 +854,27 @@ class MeetRecorderWindow(Gtk.Window):
         result = post_process(
             transcript, output.parent, output.stem,
             summarize=self._summarize,
+            summary_backend=self._summary_backend,
             summary_model=self._summary_model,
+            progress_callback=lambda msg: GLib.idle_add(
+                self._status_label.set_text, msg
+            ),
         )
         if result["pdf"]:
             self._last_pdf = result["pdf"]
+
+    def _do_sync(self, output: Path) -> None:
+        """If this is a scheduled meeting and sync is configured, push artifacts."""
+        try:
+            from meet.sync import maybe_sync_session
+            maybe_sync_session(
+                output.parent,
+                progress_callback=lambda msg: GLib.idle_add(
+                    self._status_label.set_text, msg
+                ),
+            )
+        except Exception:
+            pass  # sync is best-effort — never fail the main pipeline
 
     # ── State management ────────────────────────────────────────────────
 
@@ -965,6 +1076,7 @@ def launch(
     mic: str | None = None,
     monitor: str | None = None,
     summarize: bool = True,
+    summary_backend: str | None = None,
     summary_model: str | None = None,
 ) -> None:
     """Launch the Meet Recorder GTK3 window.
@@ -991,7 +1103,8 @@ def launch(
 
     win = MeetRecorderWindow(
         capture_kwargs, transcribe_kwargs,
-        summarize=summarize, summary_model=summary_model,
+        summarize=summarize, summary_backend=summary_backend,
+        summary_model=summary_model,
     )
     win.show_all()
     # Hide widgets that should only appear on demand

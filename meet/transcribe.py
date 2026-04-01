@@ -518,13 +518,20 @@ def _mixdown_to_mono(audio_file: Path) -> Path:
             raise RuntimeError(f"Mono mixdown failed: {result.stderr}")
         return Path(tmp.name)
 
-    # ── Read stereo WAV ──
-    with wave.open(str(audio_file), "r") as wf:
-        n_channels = wf.getnchannels()
-        sampwidth = wf.getsampwidth()
-        framerate = wf.getframerate()
-        n_frames = wf.getnframes()
-        raw = wf.readframes(n_frames)
+    # ── Read stereo WAV (only works for .wav files) ──
+    try:
+        with wave.open(str(audio_file), "r") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+    except Exception:
+        # Non-WAV format (e.g. OGG/Opus) — fall through to ffmpeg.
+        n_channels = 0
+        sampwidth = 0
+        framerate = 0
+        raw = b""
 
     if n_channels != 2 or sampwidth != 2:
         # Not the expected stereo 16-bit — fall through to ffmpeg.
@@ -896,6 +903,7 @@ def post_process(
     basename: str,
     *,
     summarize: bool = True,
+    summary_backend: str | None = None,
     summary_model: str | None = None,
     progress_callback=None,
 ) -> dict:
@@ -909,8 +917,9 @@ def post_process(
         transcript:       The completed Transcript object.
         output_dir:       Directory to write output files into.
         basename:         Stem for output filenames (e.g. "meeting-20260313-231509").
-        summarize:        Whether to attempt AI summarization via Ollama.
-        summary_model:    Ollama model name override; None uses the default.
+        summarize:        Whether to attempt AI summarization.
+        summary_backend:  Backend override ("ollama" or "openrouter"); None uses default.
+        summary_model:    Model name override; None uses the per-backend default.
         progress_callback: Optional callable(str) for status/error messages.
 
     Returns:
@@ -925,23 +934,23 @@ def post_process(
 
     if summarize:
         try:
-            from meet.summarize import (
-                summarize as do_summarize, SummaryConfig, is_ollama_available,
+            from meet.summarize import summarize as do_summarize, SummaryConfig
+
+            cfg_kwargs: dict = {}
+            if summary_backend:
+                cfg_kwargs["backend"] = summary_backend
+            if summary_model:
+                cfg_kwargs["model"] = summary_model
+            summary_config = SummaryConfig(**cfg_kwargs)
+
+            summary_result = do_summarize(
+                transcript.to_text(), summary_config,
+                language=transcript.language,
+                progress_callback=progress_callback,
             )
-            if is_ollama_available():
-                cfg_kwargs: dict = {}
-                if summary_model:
-                    cfg_kwargs["model"] = summary_model
-                summary_config = SummaryConfig(**cfg_kwargs)
-                summary_result = do_summarize(
-                    transcript.to_text(), summary_config,
-                    language=transcript.language,
-                )
-                path = summary_result.save(output_dir, basename)
-                result["summary"] = path
-                _log(f"Summary generated in {summary_result.elapsed_seconds:.1f}s")
-            else:
-                _log("Ollama not running — skipping summary")
+            path = summary_result.save(output_dir, basename)
+            result["summary"] = path
+            _log(f"Summary generated in {summary_result.elapsed_seconds:.1f}s")
         except Exception as exc:
             _log(f"Summary failed: {exc}")
 
@@ -956,5 +965,17 @@ def post_process(
         result["pdf"] = pdf_path
     except Exception as exc:
         _log(f"PDF generation failed: {exc}")
+
+    # ── Compress WAV to OGG/Opus ──
+    wav_path = output_dir / f"{basename}.wav"
+    if wav_path.exists():
+        try:
+            from meet.audio import compress_audio
+            _log("Compressing audio to OGG/Opus...")
+            ogg_path = compress_audio(wav_path)
+            result["audio"] = ogg_path
+            _log(f"Audio compressed: {ogg_path.name}")
+        except Exception as exc:
+            _log(f"Audio compression failed (WAV kept): {exc}")
 
     return result

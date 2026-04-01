@@ -54,17 +54,20 @@ def _find_session_files(session_dir: Path) -> dict[str, Path]:
     """Locate key files in a session directory. Returns dict of type -> path."""
     files: dict[str, Path] = {}
 
-    # Find JSON transcript (exclude translation files)
+    # Find JSON transcript (exclude translation, session, and summary meta files)
     for p in sorted(session_dir.glob("*.json")):
         if ".session." in p.name:
             files["session"] = p
-        elif ".translation." not in p.name:
+        elif ".translation." not in p.name and ".summary." not in p.name:
             files["json"] = p
 
-    # Find WAV
+    # Find audio file (prefer WAV if still present, fall back to OGG)
     wavs = sorted(session_dir.glob("*.wav"))
+    oggs = sorted(session_dir.glob("*.ogg"))
     if wavs:
         files["wav"] = wavs[0]
+    elif oggs:
+        files["wav"] = oggs[0]  # key stays "wav" for backward compat
 
     # Find summary
     summaries = sorted(session_dir.glob("*.summary.md"))
@@ -206,13 +209,13 @@ def extract_speaker_clip(
     speaker_info: SpeakerInfo,
     max_duration: float = 8.0,
 ) -> Path:
-    """Extract a short audio clip for a speaker from the session WAV.
+    """Extract a short audio clip for a speaker from the session audio.
 
     Reads the appropriate channel (mic for YOU-like speakers, system for
     REMOTE-like speakers) and writes a temporary mono WAV file.
 
     Args:
-        wav_path: Path to the stereo session WAV file.
+        wav_path: Path to the stereo session audio file (WAV or OGG).
         speaker_info: SpeakerInfo with channel hint and sample timestamps.
         max_duration: Maximum clip duration in seconds.
 
@@ -234,13 +237,25 @@ def extract_speaker_clip(
         else:
             channel_data = ch_data.astype(np.int32)
     else:
-        # Mono fallback: read raw
-        with wave.open(str(wav_path), "rb") as wf:
-            sampwidth = wf.getsampwidth()
-            file_sr = wf.getframerate()
-            raw = wf.readframes(wf.getnframes())
-        dtype = np.int16 if sampwidth == 2 else np.int32
-        channel_data = np.frombuffer(raw, dtype=dtype)
+        # Mono fallback: decode via ffmpeg (works for WAV, OGG, etc.)
+        cmd = [
+            "ffmpeg", "-v", "quiet",
+            "-i", str(wav_path),
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ac", "1", "-",
+        ]
+        result = subprocess.run(cmd, capture_output=True)
+        if result.returncode != 0 or not result.stdout:
+            raise RuntimeError(f"Cannot decode audio: {wav_path}")
+        sampwidth = 2
+        # Get sample rate via ffprobe
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "stream=sample_rate",
+             "-of", "csv=p=0", str(wav_path)],
+            capture_output=True, text=True,
+        )
+        file_sr = int(probe.stdout.strip()) if probe.returncode == 0 else 16000
+        channel_data = np.frombuffer(result.stdout, dtype=np.int16)
 
     # Extract the time range
     start_frame = max(0, int(speaker_info.sample_start * file_sr))
@@ -286,6 +301,8 @@ def apply_labels(
     session_dir: str | Path,
     label_map: dict[str, str],
     regenerate_summary: bool = True,
+    summary_backend: str | None = None,
+    summary_model: str | None = None,
     progress_callback: Any | None = None,
 ) -> dict[str, Path]:
     """Apply user-assigned speaker names to a session's outputs.
@@ -298,9 +315,11 @@ def apply_labels(
         label_map: Mapping of current speaker ID to new name.
             E.g. {"YOU": "Kasita", "REMOTE_1": "Ahmad"}.
             Only speakers present in the map are relabeled.
-        regenerate_summary: If True, re-run Ollama to generate a new summary
+        regenerate_summary: If True, re-run the LLM to generate a new summary
             with updated speaker names. If False, do a best-effort
             find-and-replace on the existing summary.
+        summary_backend: Backend override ("ollama" or "openrouter"); None uses default.
+        summary_model: Model name override; None uses the per-backend default.
         progress_callback: Optional callable(str) for status messages.
 
     Returns:
@@ -337,21 +356,31 @@ def apply_labels(
         _log("Regenerating summary with updated speaker names...")
         try:
             from meet.summarize import (
-                summarize as do_summarize, SummaryConfig, is_ollama_available,
+                summarize as do_summarize, SummaryConfig,
+                is_backend_available, _backend_not_available_message,
             )
             from meet.transcribe import ensure_gpu_available
 
-            if is_ollama_available():
-                ensure_gpu_available()
+            cfg_kwargs: dict = {}
+            if summary_backend:
+                cfg_kwargs["backend"] = summary_backend
+            if summary_model:
+                cfg_kwargs["model"] = summary_model
+            summary_config = SummaryConfig(**cfg_kwargs)
+
+            if is_backend_available(summary_config):
+                # Only free GPU for Ollama backend
+                if summary_config.backend == "ollama":
+                    ensure_gpu_available()
                 summary_result = do_summarize(
-                    transcript.to_text(), SummaryConfig(),
+                    transcript.to_text(), summary_config,
                     language=transcript.language,
                 )
                 path = summary_result.save(session_dir, basename)
                 result_files["summary"] = path
                 _log(f"Summary regenerated in {summary_result.elapsed_seconds:.1f}s")
             else:
-                _log("Ollama not running — skipping summary regeneration")
+                _log(_backend_not_available_message(summary_config))
                 # Fall back to find-and-replace
                 regenerate_summary = False
         except Exception as exc:

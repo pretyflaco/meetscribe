@@ -58,24 +58,32 @@ def _drain_countdown(session, seconds: int = DRAIN_SECONDS) -> None:
         signal.signal(signal.SIGINT, prev_handler)
 
 
-def _generate_summary(transcript, out_dir, basename, summary_model, files):
-    """Generate an AI meeting summary via Ollama. Returns MeetingSummary or None."""
-    from meet.summarize import summarize as do_summarize, SummaryConfig, is_ollama_available
+def _generate_summary(transcript, out_dir, basename, summary_model, files,
+                      summary_backend=None):
+    """Generate an AI meeting summary. Returns MeetingSummary or None.
 
-    if not is_ollama_available():
-        click.echo("  Ollama not running — skipping summary. Start with: ollama serve")
-        return None
+    Supports multiple backends (claudemax, openrouter, ollama) via SummaryConfig.
+    The fallback chain is handled inside summarize() — callers should not
+    gate on is_backend_available().
+    """
+    from meet.summarize import summarize as do_summarize, SummaryConfig
 
     config_kwargs = {}
+    if summary_backend:
+        config_kwargs["backend"] = summary_backend
     if summary_model:
         config_kwargs["model"] = summary_model
     summary_config = SummaryConfig(**config_kwargs)
 
-    click.echo(f"Generating meeting summary ({summary_config.model})...")
+    def _cli_progress(msg: str) -> None:
+        click.echo(f"  {msg}")
+
+    click.echo(f"Generating meeting summary ({summary_config.model} via {summary_config.backend})...")
     try:
         result = do_summarize(
             transcript.to_text(), summary_config,
             language=transcript.language,
+            progress_callback=_cli_progress,
         )
         path = result.save(out_dir, basename)
         files["summary"] = path
@@ -232,13 +240,15 @@ def record(output_dir, filename, mic, monitor, virtual_sink):
               help="Skip speaker diarization")
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
-              help="Ollama model for summary (default: qwen3.5:9b)")
+              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
 @click.option("--skip-alignment", is_flag=True, default=False,
               help="Skip word-level alignment (useful if alignment model is unavailable)")
 def transcribe(audio_file, model, device, compute_type, batch_size,
                language, hf_token, min_speakers, max_speakers, output_dir,
-               no_diarize, summarize, summary_model, skip_alignment):
+               no_diarize, summarize, summary_backend, summary_model, skip_alignment):
     """Transcribe a recorded audio file with speaker diarization."""
     from meet.transcribe import (
         TranscriptionConfig, transcribe as do_transcribe,
@@ -247,13 +257,15 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
 
     audio_path = Path(audio_file)
 
-    # If user passed a session directory, find the WAV file inside it.
+    # If user passed a session directory, find the audio file inside it.
     if audio_path.is_dir():
         wavs = sorted(audio_path.glob("*.wav"))
-        if not wavs:
-            click.echo(f"Error: no .wav file found in {audio_path}", err=True)
+        oggs = sorted(audio_path.glob("*.ogg"))
+        audio_files = wavs or oggs
+        if not audio_files:
+            click.echo(f"Error: no audio file (.wav/.ogg) found in {audio_path}", err=True)
             raise SystemExit(1)
-        audio_path = wavs[0]
+        audio_path = audio_files[0]
         click.echo(f"  Resolved to: {audio_path}")
 
     config = TranscriptionConfig(
@@ -309,7 +321,8 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
     # ── Summary + PDF ──
     summary_result = None
     if summarize:
-        summary_result = _generate_summary(transcript, out_dir, audio_path.stem, summary_model, files)
+        summary_result = _generate_summary(transcript, out_dir, audio_path.stem, summary_model, files,
+                                          summary_backend=summary_backend)
 
     _generate_pdf(transcript, out_dir, audio_path.stem, summary_result, files)
 
@@ -349,13 +362,15 @@ def transcribe(audio_file, model, device, compute_type, batch_size,
 @click.option("--virtual-sink", is_flag=True, default=False)
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
-              help="Ollama model for summary (default: qwen3.5:9b)")
+              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
 @click.option("--skip-alignment", is_flag=True, default=False,
               help="Skip word-level alignment (useful if alignment model is unavailable)")
 def run(output_dir, model, device, compute_type, batch_size,
         language, hf_token, min_speakers, max_speakers, virtual_sink,
-        summarize, summary_model, skip_alignment):
+        summarize, summary_backend, summary_model, skip_alignment):
     """Record a meeting, then transcribe when stopped with Ctrl+C."""
     from meet.capture import create_session, check_prerequisites
     from meet.transcribe import (
@@ -442,7 +457,8 @@ def run(output_dir, model, device, compute_type, batch_size,
         # ── Summary + PDF ──
         summary_result = None
         if summarize:
-            summary_result = _generate_summary(transcript, output.parent, output.stem, summary_model, files)
+            summary_result = _generate_summary(transcript, output.parent, output.stem, summary_model, files,
+                                              summary_backend=summary_backend)
 
         _generate_pdf(transcript, output.parent, output.stem, summary_result, files)
 
@@ -736,8 +752,12 @@ def translate(session_dir, target_lang, summary_model):
 @click.option("--no-audio", is_flag=True, default=False,
               help="Skip audio playback (just show text samples)")
 @click.option("--no-summary", is_flag=True, default=False,
-              help="Skip Ollama summary regeneration (use find-and-replace on existing summary)")
-def label(session_dir, no_audio, no_summary):
+              help="Skip summary regeneration (use find-and-replace on existing summary)")
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
+@click.option("--summary-model", type=str, default=None,
+              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
+def label(session_dir, no_audio, no_summary, summary_backend, summary_model):
     """Assign real names to speakers in a transcribed session.
 
     \b
@@ -863,6 +883,8 @@ def label(session_dir, no_audio, no_summary):
         session_path,
         label_map,
         regenerate_summary=regenerate_summary,
+        summary_backend=summary_backend,
+        summary_model=summary_model,
         progress_callback=lambda msg: click.echo(f"  {msg}"),
     )
 
@@ -870,6 +892,286 @@ def label(session_dir, no_audio, no_summary):
     click.echo("Updated files:")
     for fmt, path in result_files.items():
         click.echo(f"  {fmt}: {path}")
+
+
+@main.command()
+@click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
+@click.option("--list", "list_profiles", is_flag=True, default=False,
+              help="List enrolled speaker profiles and exit")
+def enroll(session_dirs, list_profiles):
+    """Enroll speaker voice profiles from labeled session directories.
+
+    Extracts voice embeddings from sessions that already have speaker labels
+    (set via 'meet label') and stores them in ~/.config/meet/speaker_profiles.json.
+    Future meetings will automatically recognize these speakers.
+
+    \b
+    Examples:
+        meet enroll ~/meet-recordings/meeting-20260330-170216_BlinkMondaySync
+        meet enroll ~/meet-recordings/meeting-20260330-*
+        meet enroll --list
+    """
+    from meet.voiceprint import enroll_session, load_profiles, PROFILES_PATH
+
+    if list_profiles:
+        profiles = load_profiles()
+        if not profiles:
+            click.echo("No speaker profiles enrolled yet.")
+            click.echo(f"  Run: meet enroll <session_dir>")
+            return
+        click.echo(f"Enrolled speaker profiles ({PROFILES_PATH}):")
+        click.echo()
+        click.echo(f"  {'Name':<20} {'Sessions'}")
+        click.echo(f"  {'----':<20} {'--------'}")
+        for name, profile in sorted(profiles.items()):
+            click.echo(f"  {name:<20} {profile.n_sessions}")
+        return
+
+    if not session_dirs:
+        click.echo("Error: provide at least one session directory, or use --list", err=True)
+        raise SystemExit(1)
+
+    total_enrolled = 0
+    total_updated = 0
+
+    for session_dir in session_dirs:
+        session_path = Path(session_dir)
+        click.echo(f"Enrolling: {session_path.name}")
+
+        try:
+            status = enroll_session(
+                session_path,
+                progress_callback=lambda msg: click.echo(msg),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            click.echo(f"  Skipped: {exc}", err=True)
+            continue
+        except Exception as exc:
+            click.echo(f"  Error: {exc}", err=True)
+            continue
+
+        enrolled = sum(1 for ok in status.values() if ok)
+        total_enrolled += enrolled
+        click.echo(f"  Done: {enrolled} speaker(s) enrolled/updated")
+        click.echo()
+
+    # Final summary
+    profiles = load_profiles()
+    click.echo(f"Profile database now contains {len(profiles)} speaker(s):")
+    for name, p in sorted(profiles.items()):
+        click.echo(f"  {name} ({p.n_sessions} session(s))")
+
+
+@main.command()
+@click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
+@click.option("--force", is_flag=True, default=False,
+              help="Push even if the meeting doesn't match a scheduled meeting")
+@click.option("--meeting-type", type=str, default=None,
+              help="Override meeting type folder (e.g. 'weekly-sync', 'dev-standup')")
+@click.option("--list-schedule", is_flag=True, default=False,
+              help="Show the current sync schedule and exit")
+@click.option("--init-config", is_flag=True, default=False,
+              help="Create an example sync config and exit")
+def sync(session_dirs, force, meeting_type, list_schedule, init_config):
+    """Sync meeting artifacts to a configured Git repository.
+
+    Detects whether each session matches a configured meeting schedule and
+    pushes the transcript, summary, PDF, SRT, and JSON to the team repo.
+    Audio files and internal metadata are excluded.
+
+    \b
+    Setup:
+        meet sync --init-config          # create example config
+        # edit ~/.config/meet/sync_config.json with your repo URL and schedule
+
+    \b
+    Examples:
+        meet sync ~/meet-recordings/meeting-20260330-170216_WeeklySync
+        meet sync --force --meeting-type weekly-sync ~/meet-recordings/meeting-20260330-*
+        meet sync --list-schedule
+    """
+    from meet.sync import (
+        detect_meeting_type, sync_session, load_sync_config,
+        save_sync_config, is_sync_configured,
+        MeetingMatch, ensure_repo_cloned,
+        SYNC_CONFIG_PATH, EXAMPLE_CONFIG,
+    )
+
+    if init_config:
+        if SYNC_CONFIG_PATH.exists():
+            click.echo(f"Config already exists: {SYNC_CONFIG_PATH}")
+            click.echo("Edit it manually or delete it to regenerate.")
+        else:
+            save_sync_config(EXAMPLE_CONFIG)
+            click.echo(f"Example config created: {SYNC_CONFIG_PATH}")
+            click.echo("Edit it with your repo URL and meeting schedule.")
+        return
+
+    if list_schedule:
+        config = load_sync_config()
+        repo_url = config.get("repo_url", "")
+        day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        if repo_url:
+            click.echo(f"Sync repo: {repo_url}")
+        else:
+            click.echo("Sync repo: (not configured)")
+        click.echo()
+
+        meetings = config.get("meetings", [])
+        if not meetings:
+            click.echo("No meetings configured.")
+            click.echo(f"Edit {SYNC_CONFIG_PATH} to add your schedule.")
+        else:
+            click.echo("Meeting schedule:")
+            click.echo()
+            for m in meetings:
+                days = ", ".join(day_names[d] for d in m.get("days", []))
+                click.echo(f"  {m['name']}")
+                click.echo(f"    folder:  meetings/{m['folder']}/")
+                click.echo(f"    days:    {days}")
+                click.echo(f"    time:    {m['hour_utc']:02d}:00 UTC ±{m.get('window_minutes', 60)} min")
+                click.echo()
+        return
+
+    if not session_dirs:
+        click.echo("Error: provide at least one session directory", err=True)
+        raise SystemExit(1)
+
+    if not is_sync_configured():
+        click.echo(
+            "Error: sync not configured. Run 'meet sync --init-config' to get started.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    for session_dir in session_dirs:
+        session_path = Path(session_dir)
+        click.echo(f"Syncing: {session_path.name}")
+
+        if meeting_type:
+            match = MeetingMatch(name=meeting_type, folder=meeting_type)
+        else:
+            match = detect_meeting_type(session_path)
+
+        if match is None and not force:
+            click.echo(
+                f"  Skipped: not a scheduled meeting "
+                f"(use --force to push anyway, --meeting-type to specify type)",
+                err=True,
+            )
+            continue
+
+        if match is None and force:
+            click.echo("  Warning: no schedule match, using 'other' folder", err=True)
+            match = MeetingMatch(name="Meeting", folder="other")
+
+        try:
+            files = sync_session(
+                session_path, match,
+                progress_callback=lambda msg: click.echo(msg),
+            )
+            click.echo(f"  Done: {len(files)} file(s) pushed as {match.folder}/")
+        except Exception as exc:
+            click.echo(f"  Error: {exc}", err=True)
+        click.echo()
+
+
+@main.command()
+@click.argument("session_dirs", nargs=-1, type=click.Path(exists=True))
+@click.option("--older-than", type=int, default=None,
+              help="Only compress sessions older than N days")
+@click.option("--keep-wav", is_flag=True, default=False,
+              help="Keep original WAV files after compression")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would be compressed without doing it")
+def archive(session_dirs, older_than, keep_wav, dry_run):
+    """Compress session WAV files to OGG/Opus to save disk space.
+
+    If no SESSION_DIRS are given, scans ~/meet-recordings/ for all sessions
+    that still have uncompressed WAV files.
+
+    \b
+    Examples:
+        meet archive
+        meet archive --dry-run
+        meet archive --older-than 7
+        meet archive ~/meet-recordings/meeting-20260325-150203_SOVEREIGNJORDAN
+        meet archive --keep-wav ~/meet-recordings/meeting-*
+    """
+    import datetime
+    from meet.audio import compress_audio
+
+    recordings_dir = Path.home() / "meet-recordings"
+
+    # Collect target directories.
+    if session_dirs:
+        dirs = [Path(d) for d in session_dirs]
+    elif recordings_dir.is_dir():
+        dirs = sorted([d for d in recordings_dir.iterdir() if d.is_dir()])
+    else:
+        click.echo(f"No session directories found in {recordings_dir}")
+        return
+
+    # Find WAV files to compress.
+    targets: list[Path] = []
+    for d in dirs:
+        for wav in sorted(d.glob("*.wav")):
+            # Skip chunk files (intermediate recording artifacts).
+            if ".chunk-" in wav.name:
+                continue
+            # Already has a compressed version?
+            if wav.with_suffix(".ogg").exists():
+                continue
+            # Age filter.
+            if older_than is not None:
+                mtime = datetime.datetime.fromtimestamp(wav.stat().st_mtime)
+                age_days = (datetime.datetime.now() - mtime).days
+                if age_days < older_than:
+                    continue
+            targets.append(wav)
+
+    if not targets:
+        click.echo("No uncompressed WAV files to archive.")
+        return
+
+    # Compute totals.
+    total_wav_size = sum(w.stat().st_size for w in targets)
+    click.echo(f"Found {len(targets)} WAV file(s) totaling "
+               f"{total_wav_size / 1_048_576:.1f} MB")
+
+    if dry_run:
+        click.echo()
+        for wav in targets:
+            size_mb = wav.stat().st_size / 1_048_576
+            click.echo(f"  [DRY RUN] {wav.parent.name}/{wav.name} ({size_mb:.1f} MB)")
+        # Estimate: Opus at 48 kbps ~= 0.36 MB/min; WAV at 16kHz stereo = 3.84 MB/min
+        estimated_ratio = 10.5
+        estimated_ogg = total_wav_size / estimated_ratio
+        click.echo(f"\n  Estimated compressed size: ~{estimated_ogg / 1_048_576:.0f} MB "
+                   f"(~{estimated_ratio:.0f}x reduction)")
+        return
+
+    # Compress each file.
+    compressed_count = 0
+    saved_bytes = 0
+    for wav in targets:
+        label = f"{wav.parent.name}/{wav.name}"
+        wav_size = wav.stat().st_size
+        click.echo(f"  Compressing {label} ({wav_size / 1_048_576:.1f} MB)...", nl=False)
+        try:
+            ogg_path = compress_audio(wav, keep_wav=keep_wav)
+            ogg_size = ogg_path.stat().st_size
+            ratio = wav_size / ogg_size if ogg_size > 0 else 0
+            saved = wav_size - ogg_size
+            saved_bytes += saved
+            compressed_count += 1
+            click.echo(f" -> {ogg_size / 1_048_576:.1f} MB ({ratio:.0f}x)")
+        except Exception as exc:
+            click.echo(f" FAILED: {exc}", err=True)
+
+    click.echo(f"\nDone: {compressed_count}/{len(targets)} files compressed, "
+               f"{saved_bytes / 1_048_576:.0f} MB saved")
 
 
 @main.command()
@@ -891,11 +1193,13 @@ def label(session_dir, no_audio, no_summary):
               help="Monitor source name (default: default sink monitor)")
 @click.option("--summarize/--no-summarize", default=True,
               help="Generate AI meeting summary (default: on)")
+@click.option("--summary-backend", type=click.Choice(["ollama", "openrouter", "claudemax"], case_sensitive=False),
+              default=None, help="Summary backend (default: ollama, or MEETSCRIBE_SUMMARY_BACKEND env var)")
 @click.option("--summary-model", type=str, default=None,
-              help="Ollama model for summary (default: qwen3.5:9b)")
+              help="Model for summary (default: per-backend, or MEETSCRIBE_SUMMARY_MODEL env var)")
 def gui(output_dir, model, device, compute_type, batch_size,
         language, hf_token, min_speakers, max_speakers, virtual_sink,
-        mic, monitor, summarize, summary_model):
+        mic, monitor, summarize, summary_backend, summary_model):
     """Launch the GUI recording widget."""
     from meet.gui import launch
 
@@ -913,6 +1217,7 @@ def gui(output_dir, model, device, compute_type, batch_size,
         mic=mic,
         monitor=monitor,
         summarize=summarize,
+        summary_backend=summary_backend,
         summary_model=summary_model,
     )
 

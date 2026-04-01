@@ -29,6 +29,9 @@ env/
 # Recordings (large binary files)
 *.wav
 
+# One-off scripts
+resummarize_sonnet.py
+
 # OS
 .DS_Store
 Thumbs.db
