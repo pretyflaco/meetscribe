@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.3.2 — 2026-04-10
+
+### New features
+
+- **`--mixdown dual` mode for headphone users** — new CLI flag on `meet transcribe`
+  and `meet run` that transcribes each stereo channel independently (mic → YOU,
+  system → REMOTE) instead of mixing to mono. This fixes transcription for
+  headphone setups where the ~20× energy difference between mic and system
+  channels causes WhisperX to suppress the quieter voice. Diarization is skipped
+  in dual mode since channel identity equals speaker identity. Default behavior
+  (`--mixdown mono`) is unchanged.
+  *(Contributed by [@Rolloniel](https://github.com/Rolloniel) in [#1](https://github.com/pretyflaco/meetscribe/pull/1))*
+
+### Bug fixes
+
+- **Speaker labeling threshold** — `_label_speakers_from_channels()` now requires
+  `mic_ratio > 0.5` before labeling a speaker as YOU. Previously, the speaker
+  with the highest mic ratio was always labeled YOU even when no speaker was
+  actually mic-dominant (e.g. system-only audio capture). When no speaker exceeds
+  the threshold, all speakers are labeled REMOTE.
+  *(Contributed by [@Rolloniel](https://github.com/Rolloniel) in [#1](https://github.com/pretyflaco/meetscribe/pull/1))*
+
+---
+
 ## v0.3.1 — 2026-04-10
 
 ### Bug fixes
