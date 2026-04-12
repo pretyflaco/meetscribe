@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.3 — 2026-04-13
+
+### New features
+
+- **GUI Pause/Resume** — the recording widget now shows side-by-side Pause and
+  Stop buttons while recording. Pressing Pause stops the current ffmpeg chunk
+  and freezes the timer; pressing Resume starts a new chunk. Stopping from
+  either recording or paused state works seamlessly — chunks are stitched
+  together automatically. The idle/done/error states still show a single
+  centered Record button as before.
+
+### Improvements
+
+- `RecordingSession` in `capture.py` gained `pause()` and `resume()` methods
+  and a `paused` field on `RecordingStatus`, making pause/resume available to
+  any future consumer (CLI, scripts, etc.) without GUI dependency.
+- The watchdog thread now skips health checks while paused, preventing false
+  stall-restart triggers.
+- Stopping from the paused state skips the 10-second drain buffer since there
+  is no active ffmpeg pipeline to flush.
+
+### Bug fixes
+
+- **CLI version string** — `meet --version` now reports the correct version
+  (`0.3.3`) instead of the stale `0.1.0` it has shown since the initial release.
+
+### Testing
+
+- 13 new tests for pause/resume functionality (`tests/test_capture.py`):
+  pause flag, ffmpeg stop, error cases, resume chunk creation, status reporting,
+  elapsed-time freezing, stop-from-paused, and watchdog behaviour.
+- All 100 tests pass.
+
+---
+
 ## v0.3.2 — 2026-04-10
 
 ### New features

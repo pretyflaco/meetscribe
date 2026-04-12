@@ -29,23 +29,24 @@ from typing import IO
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
-_WATCHDOG_INTERVAL = 3.0    # seconds between health checks
+_WATCHDOG_INTERVAL = 3.0  # seconds between health checks
 _STARTUP_POLL_INTERVAL = 0.1  # seconds between startup file-size checks
-_STARTUP_TIMEOUT = 10.0     # max seconds to wait for ffmpeg to produce data
-_MAX_RESTART_ATTEMPTS = 5   # max consecutive restart attempts
-_STALL_TIMEOUT = 15.0       # seconds of no file growth before declaring stall
-DRAIN_SECONDS = 10           # seconds to keep recording after user requests stop,
-                             # allowing ffmpeg's ~0.9x realtime pipeline to flush
+_STARTUP_TIMEOUT = 10.0  # max seconds to wait for ffmpeg to produce data
+_MAX_RESTART_ATTEMPTS = 5  # max consecutive restart attempts
+_STALL_TIMEOUT = 15.0  # seconds of no file growth before declaring stall
+DRAIN_SECONDS = 10  # seconds to keep recording after user requests stop,
+# allowing ffmpeg's ~0.9x realtime pipeline to flush
 
 # WAV format constants (must match ffmpeg output settings)
-_WAV_HEADER_BYTES = 44      # standard WAV header size
-_SAMPLE_RATE = 16000         # Hz
-_CHANNELS = 2                # stereo (left=mic, right=system)
-_BYTES_PER_SAMPLE = 2        # pcm_s16le = 16-bit = 2 bytes
+_WAV_HEADER_BYTES = 44  # standard WAV header size
+_SAMPLE_RATE = 16000  # Hz
+_CHANNELS = 2  # stereo (left=mic, right=system)
+_BYTES_PER_SAMPLE = 2  # pcm_s16le = 16-bit = 2 bytes
 _BYTES_PER_SECOND = _SAMPLE_RATE * _CHANNELS * _BYTES_PER_SAMPLE  # 64000
 
 
 # ─── Data classes ────────────────────────────────────────────────────────────
+
 
 @dataclass
 class AudioDevice:
@@ -72,6 +73,7 @@ class RecordingStatus:
     restart_count: int
     failed: bool
     fail_reason: str | None = None
+    paused: bool = False
 
 
 @dataclass
@@ -98,6 +100,9 @@ class RecordingSession:
     # Chunk tracking
     _chunks: list[Path] = field(default_factory=list, repr=False)
     _current_chunk: Path | None = field(default=None, repr=False)
+
+    # Pause state
+    _paused: bool = field(default=False, repr=False)
 
     # Watchdog state
     _watchdog_thread: threading.Thread | None = field(default=None, repr=False)
@@ -130,6 +135,7 @@ class RecordingSession:
         self._failed = False
         self._fail_reason = None
         self._restart_count = 0
+        self._paused = False
         self._chunks = []
 
         # Start first chunk — this polls until ffmpeg is actually
@@ -152,14 +158,18 @@ class RecordingSession:
     def stop(self) -> Path:
         """Stop recording, stitch chunks, and return the output file path.
 
+        Works from both recording and paused states.
+
         Returns:
             Path to the final output WAV file.
         """
         # Signal watchdog to stop
         self._stop_event.set()
 
-        # Stop current ffmpeg process
-        self._stop_ffmpeg()
+        # Stop current ffmpeg process (no-op if already paused/stopped)
+        if not self._paused:
+            self._stop_ffmpeg()
+        self._paused = False
 
         # Close ffmpeg log
         if self._ffmpeg_log:
@@ -213,6 +223,39 @@ class RecordingSession:
 
         return self.output_file
 
+    def pause(self) -> None:
+        """Pause recording by stopping the current ffmpeg chunk.
+
+        The current chunk is finalized so no audio is lost.  Call
+        :meth:`resume` to start a new chunk and continue recording.
+
+        Raises:
+            RuntimeError: If not currently recording or already paused.
+        """
+        with self._lock:
+            if self._paused:
+                raise RuntimeError("Recording is already paused")
+            if self._failed:
+                raise RuntimeError("Recording has failed; cannot pause")
+
+        # Stop the current ffmpeg process (finalizes the chunk WAV)
+        self._stop_ffmpeg()
+        self._paused = True
+
+    def resume(self) -> None:
+        """Resume recording after a pause by starting a new chunk.
+
+        Raises:
+            RuntimeError: If not currently paused.
+        """
+        with self._lock:
+            if not self._paused:
+                raise RuntimeError("Recording is not paused")
+
+        self._paused = False
+        self._start_ffmpeg_chunk()
+        self._last_growth_time = time.monotonic()
+
     def status(self) -> RecordingStatus:
         """Get current recording status (thread-safe).
 
@@ -232,7 +275,9 @@ class RecordingSession:
                     pass
 
             total_size = total_audio_bytes + _WAV_HEADER_BYTES * len(self._chunks)
-            elapsed = total_audio_bytes / _BYTES_PER_SECOND if _BYTES_PER_SECOND else 0.0
+            elapsed = (
+                total_audio_bytes / _BYTES_PER_SECOND if _BYTES_PER_SECOND else 0.0
+            )
 
             is_alive = (
                 self._ffmpeg_proc is not None
@@ -247,6 +292,7 @@ class RecordingSession:
                 restart_count=self._restart_count,
                 failed=self._failed,
                 fail_reason=self._fail_reason,
+                paused=self._paused,
             )
 
     # ── ffmpeg process management ────────────────────────────────────────
@@ -267,26 +313,39 @@ class RecordingSession:
             "ffmpeg",
             "-y",
             # Mic input (wall-clock timestamps to avoid amerge blocking)
-            "-use_wallclock_as_timestamps", "1",
-            "-f", "pulse",
-            "-channel_layout", "mono",
-            "-i", self.mic_source,
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-f",
+            "pulse",
+            "-channel_layout",
+            "mono",
+            "-i",
+            self.mic_source,
             # System audio monitor input (wall-clock timestamps)
-            "-use_wallclock_as_timestamps", "1",
-            "-f", "pulse",
-            "-channel_layout", "mono",
-            "-i", self._actual_monitor,
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-f",
+            "pulse",
+            "-channel_layout",
+            "mono",
+            "-i",
+            self._actual_monitor,
             # Merge into 2-channel stereo (left=mic, right=system)
             "-filter_complex",
             "[0:a]aformat=sample_fmts=s16:sample_rates=16000:channel_layouts=mono[mic];"
             "[1:a]aformat=sample_fmts=s16:sample_rates=16000:channel_layouts=mono[sys];"
             "[mic][sys]amerge=inputs=2[out]",
-            "-map", "[out]",
-            "-ac", "2",
-            "-ar", "16000",
+            "-map",
+            "[out]",
+            "-ac",
+            "2",
+            "-ar",
+            "16000",
             # Output as WAV — flush packets for reliable watchdog + clean shutdown
-            "-flush_packets", "1",
-            "-c:a", "pcm_s16le",
+            "-flush_packets",
+            "1",
+            "-c:a",
+            "pcm_s16le",
             str(output_path),
         ]
 
@@ -308,7 +367,9 @@ class RecordingSession:
         if self._ffmpeg_log is None or self._ffmpeg_log.closed:
             self._ffmpeg_log = open(log_path, "a")
 
-        self._ffmpeg_log.write(f"\n--- Chunk {chunk_idx} started at {datetime.now().isoformat()} ---\n")
+        self._ffmpeg_log.write(
+            f"\n--- Chunk {chunk_idx} started at {datetime.now().isoformat()} ---\n"
+        )
         self._ffmpeg_log.flush()
 
         cmd = self._build_ffmpeg_cmd(chunk_path)
@@ -446,6 +507,10 @@ class RecordingSession:
                 if self._failed:
                     break
 
+                # Skip health checks while paused (no ffmpeg process running)
+                if self._paused:
+                    continue
+
                 proc = self._ffmpeg_proc
                 if proc is None:
                     continue
@@ -480,7 +545,10 @@ class RecordingSession:
         """Concatenate multiple WAV chunks into the final output file."""
         # Build ffmpeg concat demuxer input file
         concat_list = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False, dir=self.output_dir,
+            mode="w",
+            suffix=".txt",
+            delete=False,
+            dir=self.output_dir,
         )
         try:
             for chunk in chunks:
@@ -490,11 +558,16 @@ class RecordingSession:
             concat_list.close()
 
             cmd = [
-                "ffmpeg", "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_list.name,
-                "-c", "copy",
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_list.name,
+                "-c",
+                "copy",
                 str(self.output_file),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -516,13 +589,16 @@ class RecordingSession:
 
         result = subprocess.run(
             [
-                "pactl", "load-module", "module-null-sink",
+                "pactl",
+                "load-module",
+                "module-null-sink",
                 f"sink_name={sink_name}",
                 f"sink_properties=device.description=Meet-Capture",
                 "rate=16000",
                 "channels=1",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to create virtual sink: {result.stderr}")
@@ -530,12 +606,15 @@ class RecordingSession:
 
         result = subprocess.run(
             [
-                "pactl", "load-module", "module-loopback",
+                "pactl",
+                "load-module",
+                "module-loopback",
                 f"source={sink_name}.monitor",
                 "sink=@DEFAULT_SINK@",
                 "latency_msec=1",
             ],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             self._loopback_module = int(result.stdout.strip())
@@ -561,11 +640,13 @@ class RecordingSession:
 
 # ─── Module-level helpers ────────────────────────────────────────────────────
 
+
 def list_sources() -> list[AudioDevice]:
     """List all PulseAudio/PipeWire audio sources."""
     result = subprocess.run(
         ["pactl", "list", "short", "sources"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to list sources: {result.stderr}")
@@ -576,13 +657,15 @@ def list_sources() -> list[AudioDevice]:
             continue
         parts = line.split("\t")
         if len(parts) >= 5:
-            devices.append(AudioDevice(
-                index=int(parts[0]),
-                name=parts[1],
-                driver=parts[2],
-                sample_spec=parts[3],
-                state=parts[4],
-            ))
+            devices.append(
+                AudioDevice(
+                    index=int(parts[0]),
+                    name=parts[1],
+                    driver=parts[2],
+                    sample_spec=parts[3],
+                    state=parts[4],
+                )
+            )
     return devices
 
 
@@ -590,7 +673,8 @@ def get_default_sink() -> str:
     """Get the name of the default audio output sink."""
     result = subprocess.run(
         ["pactl", "get-default-sink"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to get default sink: {result.stderr}")
@@ -601,7 +685,8 @@ def get_default_source() -> str:
     """Get the name of the default audio input source (mic)."""
     result = subprocess.run(
         ["pactl", "get-default-source"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to get default source: {result.stderr}")
@@ -677,7 +762,8 @@ def check_prerequisites() -> list[str]:
     try:
         result = subprocess.run(
             ["pactl", "list", "short", "sources"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             issues.append("PulseAudio/PipeWire server is not running.")

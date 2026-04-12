@@ -1,19 +1,36 @@
 """GTK3 GUI widget for meet — a small always-on-top recording control.
 
 Window layout (~300x180px):
+
+    Idle / Done / Error:
     ┌──────────────────────────────┐
     │  Meet Recorder               │
-    │                              │
     │     00:00:00    0 KB         │
     │     Ready                    │
-    │                              │
-    │     [ ● Record ]             │
+    │        [ ● Record ]          │
     │   Open Transcript  Open Folder│
+    └──────────────────────────────┘
+
+    Recording:
+    ┌──────────────────────────────┐
+    │  Meet Recorder               │
+    │     00:07:23    14.2 MB      │
+    │     Recording...             │
+    │  [ ⏸ Pause ]  [ ■ Stop ]    │
+    └──────────────────────────────┘
+
+    Paused:
+    ┌──────────────────────────────┐
+    │  Meet Recorder               │
+    │     00:07:23    14.2 MB      │
+    │     Paused                   │
+    │  [ ▶ Resume ]  [ ■ Stop ]   │
     └──────────────────────────────┘
 
 States:
     idle        → "Ready", green Record button
-    recording   → "Recording...", red Stop button, timer ticking
+    recording   → "Recording...", Pause + Stop buttons, timer ticking
+    paused      → "Paused", Resume + Stop buttons, timer frozen
     draining    → "Flushing buffer... Xs", buttons disabled
     transcribing → "Transcribing...", buttons disabled
     done        → "Done — transcript saved", green Record button
@@ -66,6 +83,18 @@ _CSS = b"""
 .stop-btn:hover {
     background: #c0392b;
 }
+.pause-btn {
+    background: #f39c12;
+    color: white;
+    font-weight: bold;
+    font-size: 14px;
+    border-radius: 6px;
+    padding: 8px 24px;
+    border: none;
+}
+.pause-btn:hover {
+    background: #e67e22;
+}
 .disabled-btn {
     background: #95a5a6;
     color: white;
@@ -92,6 +121,11 @@ _CSS = b"""
 .status-recording {
     font-size: 13px;
     color: #e74c3c;
+    font-weight: bold;
+}
+.status-paused {
+    font-size: 13px;
+    color: #f39c12;
     font-weight: bold;
 }
 .status-draining {
@@ -179,6 +213,7 @@ progressbar progress {
 class _State:
     IDLE = "idle"
     RECORDING = "recording"
+    PAUSED = "paused"
     DRAINING = "draining"
     PREPARING_GPU = "preparing_gpu"
     TRANSCRIBING = "transcribing"
@@ -277,11 +312,31 @@ class MeetRecorderWindow(Gtk.Window):
         self._status_label.get_style_context().add_class("status-label")
         vbox.pack_start(self._status_label, False, False, 4)
 
-        # Button
-        self._button = Gtk.Button(label="● Record")
-        self._button.get_style_context().add_class("record-btn")
-        self._button.connect("clicked", self._on_button_clicked)
-        vbox.pack_start(self._button, False, False, 4)
+        # Buttons — two layouts:
+        #   Idle/Done/Error: single centered "● Record" button
+        #   Recording/Paused: side-by-side "⏸ Pause"/"▶ Resume" + "■ Stop"
+
+        # Single record button (shown in idle/done/error states)
+        self._record_btn = Gtk.Button(label="● Record")
+        self._record_btn.get_style_context().add_class("record-btn")
+        self._record_btn.connect("clicked", self._on_record_clicked)
+        vbox.pack_start(self._record_btn, False, False, 4)
+
+        # Two-button box (shown during recording/paused states)
+        self._rec_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._rec_btn_box.set_halign(Gtk.Align.CENTER)
+
+        self._pause_btn = Gtk.Button(label="\u23f8 Pause")
+        self._pause_btn.get_style_context().add_class("pause-btn")
+        self._pause_btn.connect("clicked", self._on_pause_clicked)
+        self._rec_btn_box.pack_start(self._pause_btn, False, False, 0)
+
+        self._stop_btn = Gtk.Button(label="\u25a0 Stop")
+        self._stop_btn.get_style_context().add_class("stop-btn")
+        self._stop_btn.connect("clicked", self._on_stop_clicked)
+        self._rec_btn_box.pack_start(self._stop_btn, False, False, 0)
+
+        vbox.pack_start(self._rec_btn_box, False, False, 4)
 
         # Action buttons (shown after transcription completes)
         action_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -396,16 +451,23 @@ class MeetRecorderWindow(Gtk.Window):
         # Periodic UI update (every 500ms)
         self._poll_id = GLib.timeout_add(500, self._poll_status)
 
-    # ── Button handler ──────────────────────────────────────────────────
+    # ── Button handlers ─────────────────────────────────────────────────
 
-    def _on_button_clicked(self, _widget):
-        if (
-            self._state == _State.IDLE
-            or self._state == _State.DONE
-            or self._state == _State.ERROR
-        ):
+    def _on_record_clicked(self, _widget):
+        """Handle click on the single Record button (idle/done/error states)."""
+        if self._state in (_State.IDLE, _State.DONE, _State.ERROR):
             self._start_recording()
-        elif self._state == _State.RECORDING:
+
+    def _on_pause_clicked(self, _widget):
+        """Handle click on the Pause/Resume button."""
+        if self._state == _State.RECORDING:
+            self._pause_recording()
+        elif self._state == _State.PAUSED:
+            self._resume_recording()
+
+    def _on_stop_clicked(self, _widget):
+        """Handle click on the Stop button (recording or paused states)."""
+        if self._state in (_State.RECORDING, _State.PAUSED):
             self._stop_recording()
 
     def _on_open_transcript(self, _widget):
@@ -662,18 +724,43 @@ class MeetRecorderWindow(Gtk.Window):
         self._error_msg = None
         self._set_state(_State.RECORDING)
 
+    def _pause_recording(self):
+        """Pause the current recording session."""
+        if self._session:
+            try:
+                self._session.pause()
+                self._set_state(_State.PAUSED)
+            except Exception as exc:
+                self._set_error(f"Pause failed: {exc}")
+
+    def _resume_recording(self):
+        """Resume the recording session after a pause."""
+        if self._session:
+            try:
+                self._session.resume()
+                self._set_state(_State.RECORDING)
+            except Exception as exc:
+                self._set_error(f"Resume failed: {exc}")
+
     def _stop_recording(self):
         """Start the drain + stop + transcribe pipeline in a background thread."""
+        was_paused = self._state == _State.PAUSED
         self._set_state(_State.DRAINING)
         self._drain_remaining = DRAIN_SECONDS
         self._worker_thread = threading.Thread(
-            target=self._drain_stop_transcribe, daemon=True
+            target=self._drain_stop_transcribe,
+            args=(was_paused,),
+            daemon=True,
         )
         self._worker_thread.start()
 
-    def _drain_stop_transcribe(self):
+    def _drain_stop_transcribe(self, was_paused: bool = False):
         """Background thread: drain buffer, stop recording, transcribe, summarize, generate PDF."""
-        output = self._do_drain()
+        if was_paused:
+            # No active ffmpeg to drain — skip directly to stop + transcribe
+            output = self._do_stop_only()
+        else:
+            output = self._do_drain()
         if output is None:
             return
 
@@ -700,6 +787,21 @@ class MeetRecorderWindow(Gtk.Window):
             time.sleep(1)
         self._drain_remaining = 0
 
+        session = self._session
+        output = session.stop()
+
+        if not output.exists() or output.stat().st_size == 0:
+            GLib.idle_add(self._set_error, "No audio was recorded")
+            return None
+
+        self._last_output = output
+        return output
+
+    def _do_stop_only(self):
+        """Stop a paused session (no drain needed) and return the output path.
+
+        Returns the output Path on success, or None if recording failed.
+        """
         session = self._session
         output = session.stop()
 
@@ -998,17 +1100,13 @@ class MeetRecorderWindow(Gtk.Window):
 
     def _set_state(self, state):
         self._state = state
-        ctx = self._button.get_style_context()
-
-        # Remove all custom button classes
-        for cls in ("record-btn", "stop-btn", "disabled-btn"):
-            ctx.remove_class(cls)
 
         # Remove all status classes
         sctx = self._status_label.get_style_context()
         for cls in (
             "status-label",
             "status-recording",
+            "status-paused",
             "status-draining",
             "status-transcribing",
             "status-summarizing",
@@ -1023,6 +1121,11 @@ class MeetRecorderWindow(Gtk.Window):
         ):
             sctx.remove_class(cls)
 
+        # Remove all pause button classes
+        pctx = self._pause_btn.get_style_context()
+        for cls in ("pause-btn", "record-btn"):
+            pctx.remove_class(cls)
+
         # Hide action buttons by default; only hide alignment prompt
         # if we're NOT entering the awaiting-alignment state
         self._open_transcript_btn.hide()
@@ -1036,40 +1139,49 @@ class MeetRecorderWindow(Gtk.Window):
         if state != _State.DOWNLOADING_MODEL:
             self._progress_bar.hide()
 
+        # ── Button visibility: record button vs pause+stop button box ──
+        if state in (_State.RECORDING, _State.PAUSED):
+            self._record_btn.hide()
+            self._rec_btn_box.show_all()
+        else:
+            self._rec_btn_box.hide()
+            self._record_btn.show()
+
         if state == _State.IDLE:
-            self._button.set_label("● Record")
-            ctx.add_class("record-btn")
-            self._button.set_sensitive(True)
+            self._record_btn.set_sensitive(True)
             self._status_label.set_text("Ready")
             sctx.add_class("status-label")
             self._timer_label.set_text("00:00:00")
             self._size_label.set_text("0 KB")
 
         elif state == _State.RECORDING:
-            self._button.set_label("■ Stop")
-            ctx.add_class("stop-btn")
-            self._button.set_sensitive(True)
+            self._pause_btn.set_label("\u23f8 Pause")
+            pctx.add_class("pause-btn")
+            self._pause_btn.set_sensitive(True)
+            self._stop_btn.set_sensitive(True)
             self._status_label.set_text("Recording...")
             sctx.add_class("status-recording")
 
+        elif state == _State.PAUSED:
+            self._pause_btn.set_label("\u25b6 Resume")
+            pctx.add_class("record-btn")
+            self._pause_btn.set_sensitive(True)
+            self._stop_btn.set_sensitive(True)
+            self._status_label.set_text("Paused")
+            sctx.add_class("status-paused")
+
         elif state == _State.DRAINING:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text(f"Flushing buffer... {DRAIN_SECONDS}s")
             sctx.add_class("status-draining")
 
         elif state == _State.PREPARING_GPU:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Preparing GPU...")
             sctx.add_class("status-preparing")
 
         elif state == _State.DOWNLOADING_MODEL:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             lang_name = self._alignment_lang or "model"
             self._status_label.set_text(
                 f"Downloading alignment model for {lang_name}..."
@@ -1079,16 +1191,12 @@ class MeetRecorderWindow(Gtk.Window):
             self._progress_bar.pulse()
 
         elif state == _State.TRANSCRIBING:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Transcribing...")
             sctx.add_class("status-transcribing")
 
         elif state == _State.AWAITING_ALIGNMENT:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             lang_name = self._alignment_lang or "language"
             self._status_label.set_text(f"Alignment model missing for {lang_name}")
             sctx.add_class("status-awaiting")
@@ -1098,16 +1206,12 @@ class MeetRecorderWindow(Gtk.Window):
             self.resize(300, 280)
 
         elif state == _State.SUMMARIZING:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Generating summary...")
             sctx.add_class("status-summarizing")
 
         elif state == _State.LABELING_SPEAKERS:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Assign names to speakers")
             sctx.add_class("status-labeling")
             self._label_box.show_all()
@@ -1115,9 +1219,7 @@ class MeetRecorderWindow(Gtk.Window):
             self.resize(340, 350)
 
         elif state == _State.CONFIRMING_SYNC:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Scheduled meeting detected")
             sctx.add_class("status-confirming")
             self._sync_box.show_all()
@@ -1125,16 +1227,12 @@ class MeetRecorderWindow(Gtk.Window):
             self.resize(300, 240)
 
         elif state == _State.SYNCING:
-            self._button.set_label("■ Stop")
-            ctx.add_class("disabled-btn")
-            self._button.set_sensitive(False)
+            self._record_btn.set_sensitive(False)
             self._status_label.set_text("Syncing to repo...")
             sctx.add_class("status-syncing")
 
         elif state == _State.DONE:
-            self._button.set_label("● Record")
-            ctx.add_class("record-btn")
-            self._button.set_sensitive(True)
+            self._record_btn.set_sensitive(True)
             if self._last_output:
                 # Prefer showing PDF if it exists, otherwise .txt
                 pdf_path = self._last_output.with_suffix(".pdf")
@@ -1155,9 +1253,7 @@ class MeetRecorderWindow(Gtk.Window):
             sctx.add_class("status-done")
 
         elif state == _State.ERROR:
-            self._button.set_label("● Record")
-            ctx.add_class("record-btn")
-            self._button.set_sensitive(True)
+            self._record_btn.set_sensitive(True)
             self._status_label.set_text(self._error_msg or "Error")
             sctx.add_class("status-error")
 
@@ -1188,6 +1284,10 @@ class MeetRecorderWindow(Gtk.Window):
             sctx = self._status_label.get_style_context()
             self._status_label.set_text(f"Flushing buffer... {remaining}s")
 
+        elif self._state == _State.PAUSED:
+            # Timer and size are frozen — no updates needed
+            pass
+
         elif self._state == _State.DOWNLOADING_MODEL:
             self._progress_bar.pulse()
 
@@ -1199,8 +1299,12 @@ class MeetRecorderWindow(Gtk.Window):
         if self._poll_id:
             GLib.source_remove(self._poll_id)
             self._poll_id = None
-        # If still recording, try to stop gracefully
-        if self._session and self._state in (_State.RECORDING, _State.DRAINING):
+        # If still recording or paused, try to stop gracefully
+        if self._session and self._state in (
+            _State.RECORDING,
+            _State.PAUSED,
+            _State.DRAINING,
+        ):
             try:
                 self._session.stop()
             except Exception:
@@ -1260,6 +1364,7 @@ def launch(
     )
     win.show_all()
     # Hide widgets that should only appear on demand
+    win._rec_btn_box.hide()
     win._alignment_box.hide()
     win._label_box.hide()
     win._sync_box.hide()
