@@ -567,6 +567,21 @@ export LD_LIBRARY_PATH=$HOME/.local/lib/cuda:$LD_LIBRARY_PATH
   backend (claudemax / openrouter) — the fallback chain takes over
   automatically. See [docs/local-model-evaluation.md](docs/local-model-evaluation.md).
 
+## FAQ
+
+**Is there a GUI?** Yes — run `meet gui` for a small always-on-top GTK3
+widget with Record/Stop, live timer, status indicator, and one-click
+access to the resulting PDF and session folder. See
+[Launch the GUI widget](#launch-the-gui-widget) for details.
+
+**Does it work on Windows / macOS?** No. meetscribe currently requires
+Linux with PipeWire or PulseAudio for system-audio capture. See
+[Limitations](#limitations).
+
+**Can I use it without a GPU?** Yes, with `--device cpu`, but
+transcription will be 5–20× slower depending on the Whisper model.
+See [VRAM usage](#vram-usage).
+
 ## Contributing
 
 ```bash
