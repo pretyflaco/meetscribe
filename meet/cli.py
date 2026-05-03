@@ -148,7 +148,7 @@ def _recording_loop(session) -> None:
                 click.echo(
                     f"\r\033[K\033[1;31m✖ RECORDING FAILED\033[0m  {elapsed}  {size}  — {reason}"
                 )
-                click.echo(f"  Press Ctrl+C to transcribe what was captured.")
+                click.echo("  Press Ctrl+C to transcribe what was captured.")
                 warned_failed = True
             elif status.restart_count > last_restart_count:
                 # ffmpeg was restarted — show brief warning
@@ -167,7 +167,7 @@ def _recording_loop(session) -> None:
             time.sleep(1)
     except KeyboardInterrupt:
         # Clear the status line before returning
-        click.echo(f"\r\033[K", nl=False)
+        click.echo("\r\033[K", nl=False)
         raise
 
 
@@ -397,11 +397,11 @@ def transcribe(
         click.echo()
         click.echo(click.style(f"Error: {exc}", fg="red"), err=True)
         click.echo(err=True)
-        click.echo(f"  To download it, run:", err=True)
+        click.echo("  To download it, run:", err=True)
         click.echo(f"    meet download {exc.lang}", err=True)
         click.echo(err=True)
         click.echo(
-            f"  Or skip alignment (fewer segments, no word-level timestamps):", err=True
+            "  Or skip alignment (fewer segments, no word-level timestamps):", err=True
         )
         click.echo(
             f"    meet transcribe {audio_file} --language {exc.lang} --skip-alignment",
@@ -433,7 +433,7 @@ def transcribe(
     _generate_pdf(transcript, out_dir, audio_path.stem, summary_result, files)
 
     click.echo()
-    click.echo(f"Transcription complete!")
+    click.echo("Transcription complete!")
     click.echo(f"  Duration: {transcript.duration:.0f}s" if transcript.duration else "")
     click.echo(f"  Speakers: {len(transcript.speakers)}")
     click.echo(f"  Segments: {len(transcript.segments)}")
@@ -636,10 +636,10 @@ def run(
             click.echo()
             click.echo(click.style(f"Error: {exc}", fg="red"), err=True)
             click.echo(err=True)
-            click.echo(f"  To download it, run:", err=True)
+            click.echo("  To download it, run:", err=True)
             click.echo(f"    meet download {exc.lang}", err=True)
             click.echo(err=True)
-            click.echo(f"  Or re-run with --skip-alignment:", err=True)
+            click.echo("  Or re-run with --skip-alignment:", err=True)
             click.echo(
                 f"    meet transcribe {output} --language {exc.lang} --skip-alignment",
                 err=True,
@@ -665,7 +665,7 @@ def run(
         _generate_pdf(transcript, output.parent, output.stem, summary_result, files)
 
         click.echo()
-        click.echo(f"Done!")
+        click.echo("Done!")
         click.echo(
             f"  Duration: {transcript.duration:.0f}s" if transcript.duration else ""
         )
@@ -704,7 +704,6 @@ def download(languages, download_all):
     from meet.transcribe import (
         get_supported_alignment_languages,
         download_alignment_model,
-        check_alignment_model_cached,
     )
 
     info = get_supported_alignment_languages()
@@ -732,7 +731,7 @@ def download(languages, download_all):
         return
 
     # Validate languages
-    invalid = [l for l in languages if l not in info]
+    invalid = [lang for lang in languages if lang not in info]
     if invalid:
         supported = ", ".join(sorted(info.keys()))
         click.echo(f"Error: unsupported language(s): {', '.join(invalid)}", err=True)
@@ -1067,7 +1066,6 @@ def label(session_dir, no_audio, no_summary, auto, summary_backend, summary_mode
     temp_clips: list[Path] = []
 
     # Separate speakers into auto-matched and unrecognized
-    auto_labeled = {sp.id for sp in speakers if sp.id in auto_matches}
     unrecognized = [sp for sp in speakers if sp.id not in auto_matches]
 
     # Apply auto-matched labels directly
@@ -1105,7 +1103,7 @@ def label(session_dir, no_audio, no_summary, auto, summary_backend, summary_mode
                     try:
                         clip_path = extract_speaker_clip(wav_path, sp)
                         temp_clips.append(clip_path)
-                        click.echo(f"  Playing audio clip... ", nl=False)
+                        click.echo("  Playing audio clip... ", nl=False)
                         proc = play_clip(clip_path)
                         proc.wait()
                         click.echo("done")
@@ -1215,7 +1213,7 @@ def enroll(session_dirs, list_profiles):
         profiles = load_profiles()
         if not profiles:
             click.echo("No speaker profiles enrolled yet.")
-            click.echo(f"  Run: meet enroll <session_dir>")
+            click.echo("  Run: meet enroll <session_dir>")
             return
         click.echo(f"Enrolled speaker profiles ({PROFILES_PATH}):")
         click.echo()
@@ -1232,7 +1230,6 @@ def enroll(session_dirs, list_profiles):
         raise SystemExit(1)
 
     total_enrolled = 0
-    total_updated = 0
 
     for session_dir in session_dirs:
         session_path = Path(session_dir)
@@ -1313,7 +1310,6 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
         save_sync_config,
         is_sync_configured,
         MeetingMatch,
-        ensure_repo_cloned,
         SYNC_CONFIG_PATH,
         EXAMPLE_CONFIG,
     )
@@ -1379,8 +1375,8 @@ def sync(session_dirs, force, meeting_type, list_schedule, init_config):
 
         if match is None and not force:
             click.echo(
-                f"  Skipped: not a scheduled meeting "
-                f"(use --force to push anyway, --meeting-type to specify type)",
+                "  Skipped: not a scheduled meeting "
+                "(use --force to push anyway, --meeting-type to specify type)",
                 err=True,
             )
             continue

@@ -175,6 +175,8 @@ Options:
 - `-l auto` -- language code or `auto` to auto-detect (default: `auto`; e.g. `en`, `de`, `tr`, `fa`)
 - `--asr-backend auto` -- ASR backend: `auto`, `whisperx`, or `mlx`. On Apple
   Silicon with `mlx-whisper` installed, `auto` uses MLX Whisper for ASR.
+  MLX only replaces the transcription step; meetscribe still requires
+  WhisperX for audio loading, alignment, and diarization.
 - `--mlx-model <repo-or-path>` -- MLX Whisper model path/repo (default: maps
   `large-v3-turbo` to `mlx-community/whisper-large-v3-turbo`)
 - `--device cuda` -- `cuda` or `cpu` (default: `cuda`)
