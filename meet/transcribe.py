@@ -360,6 +360,7 @@ class TranscriptionConfig:
 
     model: str = "large-v3-turbo"
     device: str = "cuda"
+    torch_device: str | None = None
     compute_type: str = "float16"
     batch_size: int = 16
     language: str = "auto"
@@ -394,6 +395,8 @@ class TranscriptionConfig:
             )
         # Resolve model aliases (e.g. "large-v3-turbo" -> local CTranslate2 path)
         self.model = resolve_model(self.model)
+        if self.torch_device is None:
+            self.torch_device = self.device
 
         if self.hf_token is None:
             self.hf_token = os.environ.get("HF_TOKEN")
@@ -681,6 +684,17 @@ def get_audio_duration(audio_file: Path) -> float:
         return 0.0
 
 
+def _empty_torch_cache(torch_module, device: str | None) -> None:
+    """Best-effort cache release for torch-backed devices."""
+    try:
+        if device == "cuda":
+            torch_module.cuda.empty_cache()
+        elif device == "mps" and hasattr(torch_module, "mps"):
+            torch_module.mps.empty_cache()
+    except Exception:
+        pass
+
+
 def _transcribe_dual_channel(
     audio_file: Path, config: TranscriptionConfig, duration: float
 ) -> Transcript:
@@ -752,7 +766,8 @@ def _transcribe_dual_channel(
         # Free transcription model
         del model
         gc.collect()
-        torch.cuda.empty_cache()
+        _empty_torch_cache(torch, config.device)
+        _empty_torch_cache(torch, config.torch_device)
 
         # ── Align both channels ──
         if config.skip_alignment:
@@ -761,21 +776,21 @@ def _transcribe_dual_channel(
             detected_language
         ):
             gc.collect()
-            torch.cuda.empty_cache()
+            _empty_torch_cache(torch, config.torch_device)
             raise AlignmentModelMissing(detected_language)
         else:
             print(f"  Aligning word timestamps ({detected_language})...")
             try:
                 model_a, metadata = whisperx.load_align_model(
                     language_code=detected_language,
-                    device=config.device,
+                    device=config.torch_device,
                 )
                 mic_result = whisperx.align(
                     mic_result["segments"],
                     model_a,
                     metadata,
                     mic_audio,
-                    config.device,
+                    config.torch_device,
                     return_char_alignments=False,
                 )
                 sys_result = whisperx.align(
@@ -783,12 +798,12 @@ def _transcribe_dual_channel(
                     model_a,
                     metadata,
                     sys_audio,
-                    config.device,
+                    config.torch_device,
                     return_char_alignments=False,
                 )
                 del model_a
                 gc.collect()
-                torch.cuda.empty_cache()
+                _empty_torch_cache(torch, config.torch_device)
             except Exception as align_exc:
                 if detected_language in ALIGNMENT_MODELS:
                     raise AlignmentModelMissing(detected_language) from align_exc
@@ -943,7 +958,8 @@ def transcribe(
         # Free transcription model memory
         del model
         gc.collect()
-        torch.cuda.empty_cache()
+        _empty_torch_cache(torch, config.device)
+        _empty_torch_cache(torch, config.torch_device)
 
         # ── Step 2: Align for word-level timestamps ──
         if config.skip_alignment:
@@ -955,27 +971,27 @@ def transcribe(
             # the caller (CLI/GUI) can show an actionable error.
             # Free VRAM first so the error handler can download if needed.
             gc.collect()
-            torch.cuda.empty_cache()
+            _empty_torch_cache(torch, config.torch_device)
             raise AlignmentModelMissing(detected_language)
         else:
             print(f"  Aligning word timestamps ({detected_language})...")
             try:
                 model_a, metadata = whisperx.load_align_model(
                     language_code=detected_language,
-                    device=config.device,
+                    device=config.torch_device,
                 )
                 result = whisperx.align(
                     result["segments"],
                     model_a,
                     metadata,
                     audio,
-                    config.device,
+                    config.torch_device,
                     return_char_alignments=False,
                 )
 
                 del model_a
                 gc.collect()
-                torch.cuda.empty_cache()
+                _empty_torch_cache(torch, config.torch_device)
             except Exception as align_exc:
                 # For languages NOT in our registry (WhisperX supports ~39),
                 # we can't pre-check the cache.  If the download fails at
@@ -994,7 +1010,7 @@ def transcribe(
             print(f"  Running speaker diarization...")
             diarize_model = DiarizationPipeline(
                 token=config.hf_token,
-                device=config.device,
+                device=config.torch_device,
             )
 
             diarize_kwargs: dict[str, Any] = {}
@@ -1008,7 +1024,7 @@ def transcribe(
 
             del diarize_model
             gc.collect()
-            torch.cuda.empty_cache()
+            _empty_torch_cache(torch, config.torch_device)
         else:
             print(f"  Skipping diarization (no HF_TOKEN provided)")
 

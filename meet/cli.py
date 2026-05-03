@@ -209,6 +209,12 @@ def main():
     help="Device to run on (default: cuda)",
 )
 @click.option(
+    "--torch-device",
+    type=click.Choice(["cuda", "cpu", "mps"]),
+    default=None,
+    help="PyTorch device for alignment/diarization (default: same as --device)",
+)
+@click.option(
     "--compute-type",
     type=str,
     default="float16",
@@ -292,6 +298,7 @@ def transcribe(
     audio_file,
     model,
     device,
+    torch_device,
     compute_type,
     batch_size,
     language,
@@ -333,6 +340,7 @@ def transcribe(
     config = TranscriptionConfig(
         model=model,
         device=device,
+        torch_device=torch_device,
         compute_type=compute_type,
         batch_size=batch_size,
         language=language,
@@ -356,6 +364,7 @@ def transcribe(
     click.echo(f"Transcribing: {audio_path}")
     click.echo(f"  Model:    {config.model} ({config.compute_type})")
     click.echo(f"  Device:   {config.device}")
+    click.echo(f"  Torch:    {config.torch_device}")
     click.echo(f"  Language: {config.language}")
     click.echo(f"  Diarize:  {bool(config.hf_token)}")
     click.echo()
@@ -441,6 +450,12 @@ def transcribe(
     help="Whisper model (default: large-v3-turbo)",
 )
 @click.option("--device", type=click.Choice(["cuda", "cpu"]), default="cuda")
+@click.option(
+    "--torch-device",
+    type=click.Choice(["cuda", "cpu", "mps"]),
+    default=None,
+    help="PyTorch device for alignment/diarization (default: same as --device)",
+)
 @click.option("--compute-type", type=str, default="float16")
 @click.option("--batch-size", "-b", type=int, default=16)
 @click.option("--language", "-l", type=str, default="auto")
@@ -489,6 +504,7 @@ def run(
     output_dir,
     model,
     device,
+    torch_device,
     compute_type,
     batch_size,
     language,
@@ -527,6 +543,7 @@ def run(
     config = TranscriptionConfig(
         model=model,
         device=device,
+        torch_device=torch_device,
         compute_type=compute_type,
         batch_size=batch_size,
         language=language,
@@ -545,6 +562,8 @@ def run(
     click.echo(f"Recording to: {session.output_file}")
     click.echo(f"  Mic:     {session.mic_source}")
     click.echo(f"  Monitor: {session.monitor_source}")
+    click.echo(f"  Device:  {config.device}")
+    click.echo(f"  Torch:   {config.torch_device}")
     click.echo(f"  Diarize: {bool(config.hf_token)}")
     click.echo()
 

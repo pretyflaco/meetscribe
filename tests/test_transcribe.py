@@ -235,6 +235,15 @@ class TestTranscriptionConfig:
         config = TranscriptionConfig(mixdown="dual")
         assert config.mixdown == "dual"
 
+    def test_torch_device_defaults_to_device(self):
+        config = TranscriptionConfig(device="cpu")
+        assert config.torch_device == "cpu"
+
+    def test_torch_device_can_split_from_asr_device(self):
+        config = TranscriptionConfig(device="cpu", torch_device="mps")
+        assert config.device == "cpu"
+        assert config.torch_device == "mps"
+
     def test_invalid_mixdown_raises(self):
         with pytest.raises(ValueError, match="Invalid mixdown mode"):
             TranscriptionConfig(mixdown="stereo")
