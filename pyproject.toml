@@ -69,4 +69,5 @@ meet = ["prompts/*.md"]
 
 [project.optional-dependencies]
 rtl = ["arabic-reshaper>=3.0", "python-bidi>=0.4"]
+mlx = ["mlx-whisper>=0.4.3"]
 dev = ["ruff", "pytest"]

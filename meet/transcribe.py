@@ -110,6 +110,13 @@ _preload_nvrtc_builtins()
 # Local model aliases: map short names to local CTranslate2 model directories.
 # These are populated by offline conversion from HuggingFace models.
 _LOCAL_MODEL_ALIASES: dict[str, Path] = {}
+_MLX_MODEL_ALIASES: dict[str, str] = {
+    "base": "mlx-community/whisper-base",
+    "medium": "mlx-community/whisper-medium",
+    "large-v2": "mlx-community/whisper-large-v2",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
 
 _ct2_cache = Path.home() / ".cache"
 for _candidate in [
@@ -124,6 +131,30 @@ def resolve_model(name: str) -> str:
     if name in _LOCAL_MODEL_ALIASES:
         return str(_LOCAL_MODEL_ALIASES[name])
     return name
+
+
+def resolve_mlx_model(name: str) -> str:
+    """Resolve a model alias to an MLX Whisper path or Hugging Face repo."""
+    return _MLX_MODEL_ALIASES.get(name, name)
+
+
+def _mlx_available() -> bool:
+    try:
+        import importlib.util
+        return importlib.util.find_spec("mlx_whisper") is not None
+    except Exception:
+        return False
+
+
+def _apple_silicon() -> bool:
+    try:
+        import platform
+        return platform.system() == "Darwin" and platform.machine().lower() in {
+            "arm64",
+            "aarch64",
+        }
+    except Exception:
+        return False
 
 
 # ── Alignment model registry ───────────────────────────────────────────────
@@ -361,6 +392,8 @@ class TranscriptionConfig:
     model: str = "large-v3-turbo"
     device: str = "cuda"
     torch_device: str | None = None
+    asr_backend: str = "auto"
+    mlx_model: str | None = None
     compute_type: str = "float16"
     batch_size: int = 16
     language: str = "auto"
@@ -393,8 +426,17 @@ class TranscriptionConfig:
             raise ValueError(
                 f"Invalid mixdown mode '{self.mixdown}': must be 'mono' or 'dual'"
             )
-        # Resolve model aliases (e.g. "large-v3-turbo" -> local CTranslate2 path)
-        self.model = resolve_model(self.model)
+        if self.asr_backend not in ("auto", "whisperx", "mlx"):
+            raise ValueError(
+                f"Invalid ASR backend '{self.asr_backend}': must be 'auto', 'whisperx', or 'mlx'"
+            )
+        if self.asr_backend == "auto":
+            self.asr_backend = "mlx" if _apple_silicon() and _mlx_available() else "whisperx"
+        # Resolve model aliases for the selected backend.
+        if self.asr_backend == "mlx":
+            self.mlx_model = resolve_mlx_model(self.mlx_model or self.model)
+        else:
+            self.model = resolve_model(self.model)
         if self.torch_device is None:
             self.torch_device = self.device
 
@@ -695,6 +737,62 @@ def _empty_torch_cache(torch_module, device: str | None) -> None:
         pass
 
 
+def _transcribe_asr(audio, config: TranscriptionConfig, language: str | None):
+    """Run the selected ASR backend and return a WhisperX-compatible result."""
+    if config.asr_backend == "mlx":
+        import mlx_whisper
+
+        print(f"  Loading MLX model: {config.mlx_model}")
+        decode_options = {}
+        if language is not None:
+            decode_options["language"] = language
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=config.mlx_model,
+            verbose=False,
+            word_timestamps=False,
+            condition_on_previous_text=False,
+            **decode_options,
+        )
+        segments = [
+            {
+                "start": float(seg.get("start", 0.0)),
+                "end": float(seg.get("end", 0.0)),
+                "text": seg.get("text", ""),
+            }
+            for seg in result.get("segments", [])
+        ]
+        return {
+            "segments": segments,
+            "language": result.get("language") or language or "en",
+            "text": result.get("text", ""),
+        }
+
+    import whisperx
+
+    vad_options = {
+        "vad_onset": config.vad_onset,
+        "vad_offset": config.vad_offset,
+    }
+    print(
+        f"  Loading model: {config.model} ({config.compute_type}) on {config.device}"
+    )
+    model = whisperx.load_model(
+        config.model,
+        config.device,
+        compute_type=config.compute_type,
+        language=language,
+        vad_options=vad_options,
+    )
+    try:
+        print(
+            f"  Transcribing (VAD onset={config.vad_onset}, offset={config.vad_offset})..."
+        )
+        return model.transcribe(audio, batch_size=config.batch_size)
+    finally:
+        del model
+
+
 def _transcribe_dual_channel(
     audio_file: Path, config: TranscriptionConfig, duration: float
 ) -> Transcript:
@@ -717,23 +815,7 @@ def _transcribe_dual_channel(
         mic_path = _extract_mono(audio_file, channel=0)
         sys_path = _extract_mono(audio_file, channel=1)
 
-        # ── Load model once ──
-        vad_options = {
-            "vad_onset": config.vad_onset,
-            "vad_offset": config.vad_offset,
-        }
         whisper_lang = None if config.language == "auto" else config.language
-
-        print(
-            f"  Loading model: {config.model} ({config.compute_type}) on {config.device}"
-        )
-        model = whisperx.load_model(
-            config.model,
-            config.device,
-            compute_type=config.compute_type,
-            language=whisper_lang,
-            vad_options=vad_options,
-        )
 
         # Pre-compute padding
         pad_samples = (
@@ -747,7 +829,7 @@ def _transcribe_dual_channel(
             mic_audio = np.concatenate(
                 [mic_audio, np.zeros(pad_samples, dtype=mic_audio.dtype)]
             )
-        mic_result = model.transcribe(mic_audio, batch_size=config.batch_size)
+        mic_result = _transcribe_asr(mic_audio, config, whisper_lang)
 
         # Resolve language from first transcription result
         detected_language = mic_result.get("language", whisper_lang or "en")
@@ -761,10 +843,9 @@ def _transcribe_dual_channel(
             sys_audio = np.concatenate(
                 [sys_audio, np.zeros(pad_samples, dtype=sys_audio.dtype)]
             )
-        sys_result = model.transcribe(sys_audio, batch_size=config.batch_size)
+        sys_result = _transcribe_asr(sys_audio, config, whisper_lang)
 
         # Free transcription model
-        del model
         gc.collect()
         _empty_torch_cache(torch, config.device)
         _empty_torch_cache(torch, config.torch_device)
@@ -914,30 +995,9 @@ def transcribe(
         mono_path = audio_path
 
     try:
-        # ── Step 1: Transcribe with faster-whisper ──
-        print(
-            f"  Loading model: {config.model} ({config.compute_type}) on {config.device}"
-        )
-
-        vad_options = {
-            "vad_onset": config.vad_onset,
-            "vad_offset": config.vad_offset,
-        }
-
+        # ── Step 1: Transcribe with the selected ASR backend ──
         # "auto" means let WhisperX detect the language from the audio.
         whisper_lang = None if config.language == "auto" else config.language
-
-        model = whisperx.load_model(
-            config.model,
-            config.device,
-            compute_type=config.compute_type,
-            language=whisper_lang,
-            vad_options=vad_options,
-        )
-
-        print(
-            f"  Transcribing (VAD onset={config.vad_onset}, offset={config.vad_offset})..."
-        )
         audio = whisperx.load_audio(str(mono_path))
 
         # Pad audio with silence at the end so the VAD properly closes the
@@ -948,7 +1008,7 @@ def transcribe(
             pad_samples = int(config.audio_pad_seconds * 16000)
             audio = np.concatenate([audio, np.zeros(pad_samples, dtype=audio.dtype)])
 
-        result = model.transcribe(audio, batch_size=config.batch_size)
+        result = _transcribe_asr(audio, config, whisper_lang)
 
         # Resolve the actual language (important when auto-detecting).
         detected_language = result.get("language", whisper_lang or "en")
@@ -956,7 +1016,6 @@ def transcribe(
             print(f"  Detected language: {detected_language}")
 
         # Free transcription model memory
-        del model
         gc.collect()
         _empty_torch_cache(torch, config.device)
         _empty_torch_cache(torch, config.torch_device)

@@ -215,6 +215,18 @@ def main():
     help="PyTorch device for alignment/diarization (default: same as --device)",
 )
 @click.option(
+    "--asr-backend",
+    type=click.Choice(["auto", "whisperx", "mlx"]),
+    default="auto",
+    help="ASR backend: auto, whisperx, or mlx (default: auto)",
+)
+@click.option(
+    "--mlx-model",
+    type=str,
+    default=None,
+    help="MLX Whisper model path/repo (default: alias mapped from --model)",
+)
+@click.option(
     "--compute-type",
     type=str,
     default="float16",
@@ -299,6 +311,8 @@ def transcribe(
     model,
     device,
     torch_device,
+    asr_backend,
+    mlx_model,
     compute_type,
     batch_size,
     language,
@@ -341,6 +355,8 @@ def transcribe(
         model=model,
         device=device,
         torch_device=torch_device,
+        asr_backend=asr_backend,
+        mlx_model=mlx_model,
         compute_type=compute_type,
         batch_size=batch_size,
         language=language,
@@ -362,7 +378,10 @@ def transcribe(
         click.echo()
 
     click.echo(f"Transcribing: {audio_path}")
-    click.echo(f"  Model:    {config.model} ({config.compute_type})")
+    if config.asr_backend == "mlx":
+        click.echo(f"  ASR:      mlx ({config.mlx_model})")
+    else:
+        click.echo(f"  ASR:      whisperx ({config.model}, {config.compute_type})")
     click.echo(f"  Device:   {config.device}")
     click.echo(f"  Torch:    {config.torch_device}")
     click.echo(f"  Language: {config.language}")
@@ -456,6 +475,18 @@ def transcribe(
     default=None,
     help="PyTorch device for alignment/diarization (default: same as --device)",
 )
+@click.option(
+    "--asr-backend",
+    type=click.Choice(["auto", "whisperx", "mlx"]),
+    default="auto",
+    help="ASR backend: auto, whisperx, or mlx (default: auto)",
+)
+@click.option(
+    "--mlx-model",
+    type=str,
+    default=None,
+    help="MLX Whisper model path/repo (default: alias mapped from --model)",
+)
 @click.option("--compute-type", type=str, default="float16")
 @click.option("--batch-size", "-b", type=int, default=16)
 @click.option("--language", "-l", type=str, default="auto")
@@ -505,6 +536,8 @@ def run(
     model,
     device,
     torch_device,
+    asr_backend,
+    mlx_model,
     compute_type,
     batch_size,
     language,
@@ -544,6 +577,8 @@ def run(
         model=model,
         device=device,
         torch_device=torch_device,
+        asr_backend=asr_backend,
+        mlx_model=mlx_model,
         compute_type=compute_type,
         batch_size=batch_size,
         language=language,
@@ -562,6 +597,7 @@ def run(
     click.echo(f"Recording to: {session.output_file}")
     click.echo(f"  Mic:     {session.mic_source}")
     click.echo(f"  Monitor: {session.monitor_source}")
+    click.echo(f"  ASR:     {config.asr_backend}")
     click.echo(f"  Device:  {config.device}")
     click.echo(f"  Torch:   {config.torch_device}")
     click.echo(f"  Diarize: {bool(config.hf_token)}")

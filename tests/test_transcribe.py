@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from unittest.mock import patch
 
 from meet.transcribe import Segment, Speaker, Transcript, TranscriptionConfig, _fmt_time, _fmt_srt_time
+from meet.transcribe import _transcribe_asr
 from meet.transcribe import transcribe as do_transcribe
 
 
@@ -244,9 +246,59 @@ class TestTranscriptionConfig:
         assert config.device == "cpu"
         assert config.torch_device == "mps"
 
+    def test_asr_backend_auto_uses_whisperx_without_mlx(self, monkeypatch):
+        monkeypatch.setattr("meet.transcribe._apple_silicon", lambda: True)
+        monkeypatch.setattr("meet.transcribe._mlx_available", lambda: False)
+
+        config = TranscriptionConfig(asr_backend="auto")
+
+        assert config.asr_backend == "whisperx"
+
+    def test_asr_backend_auto_uses_mlx_on_apple_silicon(self, monkeypatch):
+        monkeypatch.setattr("meet.transcribe._apple_silicon", lambda: True)
+        monkeypatch.setattr("meet.transcribe._mlx_available", lambda: True)
+
+        config = TranscriptionConfig(asr_backend="auto", model="large-v3-turbo")
+
+        assert config.asr_backend == "mlx"
+        assert config.mlx_model == "mlx-community/whisper-large-v3-turbo"
+
+    def test_invalid_asr_backend_raises(self):
+        with pytest.raises(ValueError, match="Invalid ASR backend"):
+            TranscriptionConfig(asr_backend="bogus")
+
     def test_invalid_mixdown_raises(self):
         with pytest.raises(ValueError, match="Invalid mixdown mode"):
             TranscriptionConfig(mixdown="stereo")
+
+
+class TestMlxAsrBackend:
+    def test_transcribe_asr_normalizes_mlx_result(self, monkeypatch):
+        class FakeMlxWhisper:
+            @staticmethod
+            def transcribe(audio, **kwargs):
+                return {
+                    "text": " hello",
+                    "language": "en",
+                    "segments": [
+                        {"start": 0, "end": 1.25, "text": " hello"},
+                    ],
+                }
+
+        monkeypatch.setitem(sys.modules, "mlx_whisper", FakeMlxWhisper)
+        config = TranscriptionConfig(
+            asr_backend="mlx",
+            model="large-v3-turbo",
+            mlx_model="test/model",
+        )
+
+        result = _transcribe_asr("audio.wav", config, "en")
+
+        assert result == {
+            "segments": [{"start": 0.0, "end": 1.25, "text": " hello"}],
+            "language": "en",
+            "text": " hello",
+        }
 
 
 # ─── Dual-channel dispatch (mocked — full pipeline requires GPU) ──────────

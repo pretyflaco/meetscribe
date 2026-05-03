@@ -173,7 +173,13 @@ meet transcribe ~/meet-recordings/meeting-20260312-140000/meeting-20260312-14000
 Options:
 - `-m large-v3-turbo` -- Whisper model (default: `large-v3-turbo`; also: `base`, `medium`, `large-v2`)
 - `-l auto` -- language code or `auto` to auto-detect (default: `auto`; e.g. `en`, `de`, `tr`, `fa`)
+- `--asr-backend auto` -- ASR backend: `auto`, `whisperx`, or `mlx`. On Apple
+  Silicon with `mlx-whisper` installed, `auto` uses MLX Whisper for ASR.
+- `--mlx-model <repo-or-path>` -- MLX Whisper model path/repo (default: maps
+  `large-v3-turbo` to `mlx-community/whisper-large-v3-turbo`)
 - `--device cuda` -- `cuda` or `cpu` (default: `cuda`)
+- `--torch-device mps` -- optional PyTorch device for alignment/diarization;
+  useful with MLX ASR or CPU ASR on Apple Silicon.
 - `--compute-type float16` -- `float16` or `int8` for lower VRAM (default: `float16`)
 - `-b 16` -- batch size, reduce if running low on VRAM (default: `16`)
 - `--min-speakers 2` / `--max-speakers 6` -- hint for number of speakers
