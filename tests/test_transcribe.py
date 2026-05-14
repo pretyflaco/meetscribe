@@ -289,6 +289,110 @@ class TestLabelSpeakersFromChannels:
         assert "YOU" in labels, (
             f"expected YOU label via margin check, got labels={labels}"
         )
+    def test_mac_sidecar_g4_default_assigns_you_via_margin(self, tmp_path):
+        """Mac sidecar (meetscribe-record on macOS, M4.5 g4 production
+        default) produces stereo where the local user's per-speaker
+        ``mic_ratio`` lands around 0.24 — well below the absolute 0.5
+        gate but comfortably above the 0.15 floor and with a wide
+        margin over remote speakers (whose ratio sits near 0.03).
+
+        This codifies the M4.5 ``MicCapture.defaultGain = 4.0`` decision
+        as a labeler contract: future tuning of either side (sidecar
+        gain, labeler thresholds) must keep the Mac path working.
+
+        Calibration source: patternn's M6c.ii.b sign-off run
+        (2026-05-14, meetscribe-record 0.2.0a1, Apple M1 / macOS
+        26.4.1) reported ``you_ratio = 0.242``.  The synthetic
+        amplitudes here reproduce that ratio: a sine-of-amplitude
+        ``A`` has RMS ``A/sqrt(2)``, and ``mic_ratio`` reduces to
+        ``amp_mic / (amp_mic + amp_sys)`` over a single speaker's
+        segments, so amp_mic ≈ 0.316 × amp_sys yields ratio ≈ 0.24.
+
+        Three speakers (one YOU, two REMOTE) so the relative-margin
+        branch of the gate (``margin > 0.1 AND you_ratio > 0.15``) is
+        the path under test, not the absolute ``> 0.5`` shortcut.
+
+        See: meetscribe-record commit 7b4a6fd (M4.5), epic
+        pretyflaco/meetscribe-record#1, M7 sign-off."""
+        import numpy as np
+        import wave as wave_mod
+        from meet.transcribe import _label_speakers_from_channels
+
+        sr = 16000
+
+        def _seg(secs, freq_mic, amp_mic, freq_sys, amp_sys):
+            n = int(secs * sr)
+            t = np.linspace(0.0, secs, n, dtype=np.float32, endpoint=False)
+            mic = (amp_mic * np.sin(2 * np.pi * freq_mic * t)).astype(np.int16)
+            sysc = (amp_sys * np.sin(2 * np.pi * freq_sys * t)).astype(np.int16)
+            return mic, sysc
+
+        # YOU window 1: 0..15s.  Mic / system amplitude ratio 3800/12000
+        # ≈ 0.317 ⇒ mic_ratio ≈ 0.241 (verified by local prototype).
+        m0a, s0a = _seg(15.0, 220.0, 3800, 660.0, 12000)
+        # Silence 15..20s (warmup-like padding between speakers).
+        sil1_m = np.zeros(int(5.0 * sr), dtype=np.int16)
+        sil1_s = np.zeros(int(5.0 * sr), dtype=np.int16)
+        # REMOTE_A window: 20..35s.  Mic ≈ ambient bleed (amp 600),
+        # system loud (amp 18000) ⇒ mic_ratio ≈ 0.032.
+        m1, s1 = _seg(15.0, 110.0, 600, 880.0, 18000)
+        # Silence 35..55s.
+        sil2_m = np.zeros(int(20.0 * sr), dtype=np.int16)
+        sil2_s = np.zeros(int(20.0 * sr), dtype=np.int16)
+        # YOU window 2: 55..70s.
+        m0b, s0b = _seg(15.0, 220.0, 3800, 660.0, 12000)
+        # Silence 70..75s.
+        sil3_m = np.zeros(int(5.0 * sr), dtype=np.int16)
+        sil3_s = np.zeros(int(5.0 * sr), dtype=np.int16)
+        # REMOTE_B window: 75..90s.
+        m2, s2 = _seg(15.0, 165.0, 600, 990.0, 18000)
+
+        mic = np.concatenate([m0a, sil1_m, m1, sil2_m, m0b, sil3_m, m2])
+        system = np.concatenate([s0a, sil1_s, s1, sil2_s, s0b, sil3_s, s2])
+        stereo = np.column_stack((mic, system)).flatten()
+
+        wav_path = tmp_path / "mac-sidecar-g4.wav"
+        with wave_mod.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(stereo.tobytes())
+
+        segments = [
+            Segment(start=0.0,  end=15.0, text="me talking 1",     speaker="SPEAKER_00"),
+            Segment(start=20.0, end=35.0, text="remote a talking", speaker="SPEAKER_01"),
+            Segment(start=55.0, end=70.0, text="me talking 2",     speaker="SPEAKER_00"),
+            Segment(start=75.0, end=90.0, text="remote b talking", speaker="SPEAKER_02"),
+        ]
+        speakers = [
+            Speaker(id="SPEAKER_00"),
+            Speaker(id="SPEAKER_01"),
+            Speaker(id="SPEAKER_02"),
+        ]
+
+        new_segs, new_spks = _label_speakers_from_channels(
+            wav_path, segments, speakers,
+        )
+
+        # SPEAKER_00 must become YOU via the margin branch.
+        you_segs = [s for s in new_segs if s.speaker == "YOU"]
+        assert len(you_segs) == 2, (
+            f"expected exactly 2 YOU segments (the local user's two "
+            f"windows), got {[(s.speaker, s.start, s.end) for s in new_segs]}"
+        )
+        you_starts = sorted(s.start for s in you_segs)
+        assert you_starts == [0.0, 55.0]
+
+        # The other two raw speakers must become REMOTE_1 / REMOTE_2.
+        remote_labels = sorted(s.speaker for s in new_segs if s.speaker != "YOU")
+        assert remote_labels == ["REMOTE_1", "REMOTE_2"], (
+            f"expected REMOTE_1 + REMOTE_2 for the two remote speakers, "
+            f"got {remote_labels}"
+        )
+
+        # Speaker objects must be relabeled too.
+        new_ids = sorted(s.id for s in new_spks)
+        assert new_ids == ["REMOTE_1", "REMOTE_2", "YOU"]
 
 
 # ─── TranscriptionConfig validation ──────────────────────────────────────
