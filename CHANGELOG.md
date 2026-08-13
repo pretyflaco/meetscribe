@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.15.0 — feat: sync pushes user attachments verbatim
+
+### Added
+
+* **`millet/sync.py`** — files a user drops into `<session>/attachments/` are
+  now pushed into an `attachments/` subdirectory of the meeting folder, with
+  their **names intact**. `_collect_files()` gained `_collect_attachments()`,
+  which deliberately bypasses both `PUSH_SUFFIXES` and the descriptive-rename
+  map: the map keys off the suffix alone, so an attached `slides.pdf` would
+  land as `transcript.pdf` (or force the real transcript to keep its raw
+  name), and the allowlist dropped every image, office document and video —
+  most of what people attach to a meeting. The copy loop in `sync_session()`
+  now creates `dest.parent` so the subdirectory prefix works; `git add`
+  needed no change.
+
+  Guards: symlinks are skipped (the collected pairs are copied into a git
+  clone, and a link could point anywhere on the host), as are dotfiles and
+  nested directories. `MAX_ATTACHMENTS` (50) and `MAX_ATTACHMENTS_BYTES`
+  (100 MB) cap what a mis-aimed folder can push into the archive repo.
+  Sessions without an `attachments/` directory collect exactly what they did
+  before.
+
+  This is the upstream half of vezir's attachment-folder workflow: vezir
+  stores attachments in the session directory it hands to `millet sync`, so
+  nothing further is needed on that side to get them into the team repo.
+
 ## v0.14.1 — fix: speaker relabel swap collapsed both speakers to one name
 
 ### Fixed — correctness

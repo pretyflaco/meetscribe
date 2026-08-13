@@ -154,6 +154,12 @@ def _resolve_sync_config_path(
 # ─── Files to push (by suffix) ───────────────────────────────────────────────
 
 PUSH_SUFFIXES = {".md", ".txt", ".pdf", ".srt", ".json"}
+# User-supplied meeting attachments live in this subdirectory of the session
+# dir and are pushed verbatim into the same subdirectory of the meeting folder.
+# See _collect_attachments.
+ATTACHMENTS_SUBDIR = "attachments"
+MAX_ATTACHMENTS = 50
+MAX_ATTACHMENTS_BYTES = 100 * 1024 * 1024
 # Exclude session metadata and large raw files
 EXCLUDE_PATTERNS = {
     ".session.json",
@@ -696,6 +702,49 @@ def _collect_files(session_dir: Path) -> list[tuple[Path, str]]:
         used_names.add(dest_name)
 
         result.append((f, dest_name))
+
+    result.extend(_collect_attachments(session_dir))
+    return result
+
+
+def _collect_attachments(session_dir: Path) -> list[tuple[Path, str]]:
+    """Return (source, ``attachments/<name>``) pairs for user-supplied files.
+
+    Files a user dropped into ``<session>/attachments/`` — slides, agendas,
+    screenshots — are pushed verbatim: neither ``PUSH_SUFFIXES`` nor the
+    descriptive-rename map above applies to them.  Both would be wrong here.
+    The rename map keys off the suffix alone, so an attached ``slides.pdf``
+    would land as ``transcript.pdf``, and the suffix allowlist would drop
+    every image, office document and video.
+
+    Symlinks are skipped: the pairs returned here are copied into a git
+    clone, and a link could point anywhere on the host.  Count and total
+    size are capped so a mis-aimed folder can't bloat the archive repo.
+    """
+    adir = session_dir / ATTACHMENTS_SUBDIR
+    if not adir.is_dir():
+        return []
+
+    result: list[tuple[Path, str]] = []
+    total = 0
+    for f in sorted(adir.iterdir()):
+        if f.is_symlink() or not f.is_file() or f.name.startswith("."):
+            continue
+        if len(result) >= MAX_ATTACHMENTS:
+            log.warning(
+                "sync: more than %d attachments in %s — pushing the first %d only",
+                MAX_ATTACHMENTS, adir, MAX_ATTACHMENTS,
+            )
+            break
+        size = f.stat().st_size
+        if total + size > MAX_ATTACHMENTS_BYTES:
+            log.warning(
+                "sync: attachments in %s exceed %d bytes — skipping %s and the rest",
+                adir, MAX_ATTACHMENTS_BYTES, f.name,
+            )
+            break
+        total += size
+        result.append((f, f"{ATTACHMENTS_SUBDIR}/{f.name}"))
     return result
 
 
@@ -819,6 +868,8 @@ def sync_session(
     copied: list[Path] = []
     for src, dest_name in source_files:
         dest = target_dir / dest_name
+        # dest_name carries an "attachments/" prefix for attached files.
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         copied.append(dest)
         _log(f"  Staged: {dest.relative_to(repo)}")

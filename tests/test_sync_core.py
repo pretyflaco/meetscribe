@@ -356,6 +356,108 @@ def test_sync_session_disambiguates_different_session(
     assert suffixed, "second session must land in a disambiguated folder"
 
 
+# ─── attachments passthrough ─────────────────────────────────────────────────
+
+
+def _attach(sdir: Path, name: str, content: bytes = b"data") -> Path:
+    adir = sdir / sync.ATTACHMENTS_SUBDIR
+    adir.mkdir(exist_ok=True)
+    p = adir / name
+    p.write_bytes(content)
+    return p
+
+
+def test_collect_attachments_bypasses_allowlist_and_rename_map(tmp_path):
+    """Attachment names are the user's and must survive verbatim — the
+    suffix-keyed rename map would turn slides.pdf into transcript.pdf and
+    PUSH_SUFFIXES would drop images and office documents entirely."""
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01ATTACH")
+    _attach(sdir, "slides.pdf")
+    _attach(sdir, "diagram.png")
+    _attach(sdir, "agenda.pptx")
+
+    dests = dict((d, s) for s, d in sync._collect_files(sdir))
+    # The session's own transcript still gets its descriptive name.
+    assert "transcript.txt" in dests
+    # Attachments keep theirs, under the subdir, whatever the suffix.
+    assert "attachments/slides.pdf" in dests
+    assert "attachments/diagram.png" in dests
+    assert "attachments/agenda.pptx" in dests
+    # Nothing was renamed into the pipeline's namespace.
+    assert "transcript.pdf" not in dests
+
+
+def test_collect_attachments_skips_symlinks_dotfiles_and_subdirs(tmp_path):
+    """These pairs get copied into a git clone: a symlink could point
+    anywhere on the host."""
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01ATTACH")
+    _attach(sdir, "keep.pdf")
+    _attach(sdir, ".hidden")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("ssh key")
+    (sdir / sync.ATTACHMENTS_SUBDIR / "link.txt").symlink_to(outside)
+    (sdir / sync.ATTACHMENTS_SUBDIR / "nested").mkdir()
+
+    dests = [d for _, d in sync._collect_files(sdir)]
+    assert "attachments/keep.pdf" in dests
+    assert not any(
+        d.endswith(("link.txt", ".hidden", "nested")) for d in dests
+    ), dests
+
+
+def test_collect_files_unchanged_without_attachments_dir(tmp_path):
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01ATTACH")
+    dests = [d for _, d in sync._collect_files(sdir)]
+    assert dests == ["summary.md", "transcript.txt"]
+
+
+def test_collect_attachments_caps_count(monkeypatch, tmp_path):
+    monkeypatch.setattr(sync, "MAX_ATTACHMENTS", 2)
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01ATTACH")
+    for i in range(5):
+        _attach(sdir, f"f{i}.png")
+
+    attached = [d for _, d in sync._collect_files(sdir) if d.startswith("attachments/")]
+    assert attached == ["attachments/f0.png", "attachments/f1.png"]
+
+
+def test_collect_attachments_caps_total_bytes(monkeypatch, tmp_path):
+    monkeypatch.setattr(sync, "MAX_ATTACHMENTS_BYTES", 20)
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01ATTACH")
+    _attach(sdir, "a.png", b"x" * 15)
+    _attach(sdir, "b.png", b"x" * 15)
+
+    attached = [d for _, d in sync._collect_files(sdir) if d.startswith("attachments/")]
+    assert attached == ["attachments/a.png"]
+
+
+def test_sync_session_pushes_attachments_subdir(monkeypatch, tmp_path, local_remote):
+    monkeypatch.setattr(sync, "CLONE_BASE_DIR", tmp_path / "clones")
+    monkeypatch.setattr(
+        sync, "load_sync_config",
+        lambda team=None, config_path=None: {
+            "repo_url": str(local_remote), "meetings": [],
+        },
+    )
+
+    sdir = _make_session(tmp_path, "meeting-20260706-100000", "01TESTULID")
+    _attach(sdir, "slides.pdf", b"%PDF-1.4 slides")
+    _attach(sdir, "photo of board.png", b"\x89PNG board")
+    match = sync.MeetingMatch(name="Weekly", folder="weekly")
+    sync.sync_session(sdir, match, progress_callback=lambda m: None)
+
+    check = tmp_path / "check"
+    _git("clone", str(local_remote), str(check))
+    meeting_dir = check / "meetings" / "2026-07-06_weekly"
+    assert (meeting_dir / "attachments" / "slides.pdf").read_bytes() == b"%PDF-1.4 slides"
+    assert (
+        meeting_dir / "attachments" / "photo of board.png"
+    ).read_bytes() == b"\x89PNG board"
+    # The pipeline's own artifacts are untouched by the attachment pass.
+    assert (meeting_dir / "transcript.txt").read_text() == "transcript\n"
+    assert not (meeting_dir / "transcript.pdf").exists()
+
+
 # ─── sanity: dates used above ────────────────────────────────────────────────
 
 
