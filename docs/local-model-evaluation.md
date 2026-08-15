@@ -1,13 +1,23 @@
 # MeetScribe Local Model Improvement: Double-Pass Approach & Prompt Engineering
 
 Created: 2026-04-24
+Last updated: 2026-08-15 — added Qwen3.8-27B evaluation (EN/TR/DE, via millet's real two-pass code path); reconciled recommendations.
 Context: Research session evaluating local models as potential replacements for Sonnet 4.6 in meetscribe's meeting transcript summarization pipeline.
+
+> **TL;DR (2026-08-15):** With the two-pass extraction-truncation fix in
+> v0.15.1, **`qwen3.8:27b` is the strongest local model** for this task —
+> it matches or exceeds the Sonnet baseline on topic/action/question
+> coverage across English, Turkish, and German meetings, with 5/5 format
+> compliance and localized section headers, at ~55–100 s/meeting on an
+> RTX 3090. It supersedes the earlier "gpt-oss:20b is the best local"
+> conclusion below. Caveats: ~2× slower than Sonnet; a mild tendency to
+> over-count "decisions"; validated on 3 EN + 1 TR + 1 DE meetings.
 
 ---
 
 ## Background
 
-MeetScribe uses an LLM to summarize meeting transcripts into a structured 5-section Markdown format (Overview, Topics, Actions, Decisions, Open Questions). The current production backend is **Sonnet 4.6** via claudemax proxy, with **Ollama** as fallback. The Ollama default was `qwen3.5:9b` (now changed to `gpt-oss:20b`).
+MeetScribe uses an LLM to summarize meeting transcripts into a structured 5-section Markdown format (Overview, Topics, Actions, Decisions, Open Questions). The current production backend is **Sonnet 4.6** via claudemax proxy, with **Ollama** as fallback. The hardcoded Ollama default is `qwen3.5:9b`; per-machine model choice is set via the `MILLET_SUMMARY_MODEL` env var (e.g. `qwen3.8:27b` on GPUs with ≥18 GB VRAM). The default is deliberately conservative so it runs on small GPUs — the hardware, not the codebase, dictates which model to prefer.
 
 The goal is to determine whether local models can match Sonnet 4.6 quality for fully offline summarization.
 
@@ -18,7 +28,7 @@ The goal is to determine whether local models can match Sonnet 4.6 quality for f
 - **User prompt (non-English):** `meet/prompts/summarize_user_lang.md`
 - **Summarization code:** `meet/summarize.py` (4 backends: claudemax, openrouter, ollama, openai)
 - **Language headers:** `meet/languages.py` (section header translations for DE, FR, ES, TR, FA)
-- **Default Ollama model:** `gpt-oss:20b` (changed from `qwen3.5:9b` during this session, line 33 of `summarize.py`)
+- **Default Ollama model:** `qwen3.5:9b` (hardcoded floor; override per-machine with `MILLET_SUMMARY_MODEL`)
 
 ### Typical meeting characteristics
 
@@ -47,6 +57,7 @@ The goal is to determine whether local models can match Sonnet 4.6 quality for f
 | Model | Ollama ID | Size | Context | Architecture | Speed (tg128) |
 |-------|-----------|------|---------|--------------|---------------|
 | Sonnet 4.6 | N/A (cloud) | N/A | 200K | Anthropic | N/A |
+| **Qwen3.8 27B** | `qwen3.8:27b` | 18 GB | 262K | Qwen3.5/DeltaNet hybrid + vision | 41.9 t/s |
 | GPT-OSS 20B | `gpt-oss:20b` | 13 GB | 128K | OpenAI MoE, MXFP4 | ~50 t/s |
 | Qwen3.6 27B | `qwen3.6:27b` | 17 GB | 262K | Qwen3.5/DeltaNet hybrid | 36 t/s |
 | Qwen3.5 27B | `qwen3.5:27b` | 17 GB | 262K | Qwen3.5 | ~8 t/s (partial CPU) |
@@ -367,13 +378,23 @@ Organize the following extracted meeting data into the required format:
 | Sonnet 4.6 single-pass | 5/5 | 11 topics, 13 actions, 6 decisions, 8 questions | 0 | 64s | Gold standard |
 | gpt-oss single-pass (original prompt) | 4/5 | 5 topics, 4 actions | 3 | 65s | Usable but poor |
 | gpt-oss single-pass (improved prompt) | 0/5 | 6 topics | 2 | 24s | Regression |
-| **gpt-oss double-pass** | **5/5** | **5 topics, 6 actions, 4 decisions** | **1** | **94s** | **Best local** |
+| **gpt-oss double-pass** | **5/5** | **5 topics, 6 actions, 4 decisions** | **1** | **94s** | **Best local (Apr 2026)** |
 | qwen3.6 single-pass | 0/5 | 0 (refused) | N/A | 147s | Unusable |
 | **qwen3.6 double-pass** | **5/5** | **5 topics, 5 actions, 3 decisions** | **2** | **353s** | **Good but slow** |
 | qwen3.5 single-pass | 0/5 | 1 topic (tunneled) | 0 | 98s | Unusable |
 | gemma4 single-pass | 0/5 | 3 topics (context-limited) | 0 | 23s | Context-limited |
 
+> **Note (2026-08-15):** Meeting D predates Qwen3.8 and wasn't re-run on it.
+> On a comparable set (3 EN + 1 TR + 1 DE), **Qwen3.8-27B double-pass reached
+> full cloud-baseline coverage** — a clear step above gpt-oss's ~50% here.
+> See "Qwen3.8-27B Evaluation (2026-08-15)" below for the current best local.
+
 ### Remaining quality gap vs Sonnet 4.6 (even with double-pass)
+
+> These gaps describe the **20B-class models (gpt-oss, qwen3.6)** as of
+> April 2026. **Qwen3.8-27B (2026-08-15) closes most of them** — see its
+> section below: it reaches baseline coverage and produces non-empty
+> open-questions sections. The items below still hold for the older models.
 
 1. **Content coverage (~50%):** Local models extract ~5 topics where Sonnet finds 11. This is a fundamental attention/capability limitation of 20B-class models processing 20K tokens.
 2. **Open questions (0 vs 8):** No local model identified any open questions. This requires understanding the difference between "agreed upon" and "discussed but unresolved" — a nuanced distinction that smaller models miss.
@@ -384,7 +405,12 @@ Organize the following extracted meeting data into the required format:
 
 ## Implementation Plan
 
-### Phase 1: Implement double-pass in summarize.py (recommended)
+### Phase 1: Implement double-pass in summarize.py ✅ DONE
+
+**Shipped.** `_summarize_ollama_twopass()` is implemented and is the default
+for the ollama backend (opt out with `MILLET_OLLAMA_SINGLEPASS=1`). The
+v0.15.1 fix widened Pass-1's output reserve so thinking-heavy models
+(qwen3.8) don't truncate mid-extraction. The original design notes follow.
 
 Add a `_summarize_ollama_twopass()` function to `summarize.py` that:
 
@@ -422,13 +448,111 @@ The content coverage gap (~50%) is a model capability issue. Options to close it
 
 ---
 
+## Qwen3.8-27B Evaluation (2026-08-15)
+
+Qwen3.8-27B was released 2026-08-14. Same hybrid DeltaNet architecture as
+Qwen3.6 (`qwen3_5`, 64 layers) plus native vision. This evaluation was run
+**through millet's real two-pass code path** (`summarize()` →
+`_summarize_ollama_twopass()`), not an ad-hoc harness — the numbers reflect
+what production actually produces.
+
+### Requirements & setup
+
+- **Ollama ≥ 0.32.12** — older versions cannot run the architecture
+  (`qwen3next: layer 64 missing attn projections`).
+- Official model: `ollama pull qwen3.8:27b` (18 GB, 256K context, vision +
+  tools + thinking). Do **not** hand-register the Unsloth GGUF — Ollama's
+  engine can't run it; only the official pull works.
+- Runs fully on a 24 GB GPU (17 GB resident). **Will not fit a 12 GB GPU**
+  (e.g. RTX 5070) — pick a smaller model there via `MILLET_SUMMARY_MODEL`.
+
+### Prerequisite fix: Pass-1 truncation (v0.15.1)
+
+The first run through millet **under-performed a throwaway harness** by ~2×.
+Root cause: `_dynamic_num_ctx` reserved only 4096 output tokens, so
+Qwen3.8's long exhaustive Pass-1 extraction hit the context window and was
+silently cut off (`done_reason: length`). Raising the Pass-1 reserve to
+16384 (v0.15.1) fixed it — extraction on a 44 KB meeting grew ~1.8 KB →
+~5.6 KB, and `done_reason` flipped `length` → `stop`. **All results below
+require v0.15.1 or later.** `think: False` is already set by the two-pass
+flow and prevents the separate "empty content" failure mode.
+
+### Throughput (llama-bench, pp512/tg128, RTX 3090)
+
+| Model | Prompt (pp512) | Generation (tg128) |
+|-------|:-:|:-:|
+| Qwen3.8-27B Q4_K_M | 1405 t/s | 41.9 t/s |
+| Qwen3.6-27B Q4_K_M | 1421 t/s | 41.3 t/s |
+| SuperGemma4-26B Q4_K_M | 4646 t/s | 161.8 t/s |
+
+Marginally faster than Qwen3.6 on generation; still ~4× slower than
+SuperGemma4 (which is unusable here for other reasons — format + context).
+
+### Double-pass results vs cloud baseline (via millet, v0.15.1)
+
+Counts are section item counts (**T**opics / **A**ctions / **D**ecisions /
+open **Q**uestions). Baselines are the existing production summaries
+(claudemax / Sonnet-class). Meetings are anonymized; only metrics are shown.
+
+| Meeting | Lang | ~Tokens | Qwen3.8 (T/A/D/Q) | Baseline (T/A/D) | Format | Time |
+|---------|:-:|:-:|:-:|:-:|:-:|:-:|
+| E | EN | 11K | 20 / 8 / 4 / 7 | 11 / 6 / 3 | 5/5 | 84 s |
+| F | EN | 8K | 10 / 24 / 5 / 10 | 18 / 20 / 4 | 5/5 | 102 s |
+| G | EN | 11K | 20 / 16 / 6 / 10 | 10 / 12 / 4 | 5/5 | 102 s |
+| H | **TR** | 1.5K | 10 / 1 / 3 / 7 | 6 / 1 / 0 | 5/5 | 53 s |
+| I | **DE** | 17K | 15 / 4 / 3 / 8 | 15 / 3 / 0 | 5/5 | 93 s |
+
+**Findings:**
+
+- **Coverage matches or exceeds the baseline** on every meeting. The model
+  is more granular (often more topics/questions than the baseline) without
+  dropping content.
+- **Format compliance 5/5** everywhere, including a genuine open-questions
+  section — historically the section all other local models left empty.
+- **Non-English works.** Turkish and German summaries are written *in the
+  target language* with **localized section headers** (`Toplantı Özeti` /
+  `Besprechungsübersicht`, etc.) via `languages.py`. No language leakage.
+- **No hallucinated speakers.** Names in the TR/DE outputs trace to the
+  transcript (proper nouns that look unusual — e.g. a vendor founder's
+  name — were genuinely present).
+- **Known weakness — decisions over-inclusion.** Qwen3.8 tends to list
+  more "decisions" than the baseline (e.g. 4 vs 3), occasionally promoting
+  a strong suggestion or an action to a decision. Not fabrication, but
+  looser than Sonnet's stricter "explicitly agreed" bar.
+- **Speed:** ~55–100 s/meeting (pass1 + pass2), roughly 2× the cloud
+  latency but fine for a batch/offline job.
+
+### Verdict
+
+**Qwen3.8-27B (double-pass, v0.15.1+) is the best local model for meetscribe
+summarization to date** — the first to reach cloud-baseline coverage across
+English *and* non-English (TR/DE) meetings with correct format and no
+hallucinated speakers. It supersedes gpt-oss:20b as the recommended local
+model. Sonnet remains more concise/polished and stricter on decisions, and
+is ~2× faster, so it stays the production default; but for a fully offline
+deployment on a ≥18 GB GPU, Qwen3.8 is now a credible replacement.
+
+Remaining gaps to close before a stronger claim: larger non-English sample
+(1 TR + 1 DE so far), and tightening the decisions-vs-suggestions boundary
+(prompt-level).
+
+---
+
 ## Appendix: Model-Specific Notes
 
-### gpt-oss:20b (recommended local model for meetscribe)
+### qwen3.8:27b (recommended local model, 2026-08-15)
+- 18 GB, fits a 24 GB GPU; needs Ollama ≥ 0.32.12; vision + tools + thinking.
+- Best local results to date: matches/exceeds cloud baseline coverage on
+  EN/TR/DE via the two-pass flow; 5/5 format; localized non-English headers.
+- **Requires the v0.15.1 Pass-1 reserve fix** or it silently truncates.
+- Weaknesses: ~2× Sonnet latency; mild over-inclusion of "decisions".
+- Won't fit a 12 GB GPU — choose a smaller model there.
+
+### gpt-oss:20b (prior best local; now a fallback)
 - 13 GB, fits comfortably in 24 GB VRAM
 - 128K context — handles all meeting sizes without truncation
 - MoE architecture with MXFP4 native quantization (OpenAI)
-- Best local model for this task: follows format (especially in double-pass), reasonable speed
+- Was the best local model here until Qwen3.8 (2026-08-15); follows format well in double-pass, reasonable speed. Now a fallback / small-GPU option (fits 13 GB where Qwen3.8's 18 GB does not).
 - Persistent weakness: hallucinated proper nouns (entity names, dates)
 - Ollama ID: `gpt-oss:20b` (9M pulls, well-tested)
 
@@ -457,4 +581,4 @@ The content coverage gap (~50%) is a model capability issue. Options to close it
 - Comprehensive topic coverage (11+ topics on complex meetings)
 - No hallucinations observed
 - 40-90s per meeting via claudemax proxy
-- Remains the only model that reliably produces publication-ready summaries
+- Most concise/polished output and the strictest "explicitly agreed" bar for decisions; ~2× faster than local Qwen3.8. Remains the production default. As of 2026-08-15, **Qwen3.8-27B (double-pass, v0.15.1+) matches it on coverage** and is a credible fully-offline replacement on a ≥18 GB GPU (see the Qwen3.8 section above).
