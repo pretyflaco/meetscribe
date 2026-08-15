@@ -643,6 +643,7 @@ def _call_ollama_chat(
     config: SummaryConfig,
     *,
     num_ctx: int | None = None,
+    output_reserve: int = 4096,
     timeout: int | None = None,
     temperature: float | None = None,
 ) -> tuple[str, float]:
@@ -650,6 +651,12 @@ def _call_ollama_chat(
 
     Raises ConnectionError if Ollama is unreachable, RuntimeError on API
     error / empty response.  Used by both the single-pass and two-pass flows.
+
+    ``output_reserve`` is the token budget reserved for the model's own
+    output when ``num_ctx`` is auto-sized.  The two-pass extraction (Pass 1)
+    overrides the 4096 default: thinking-heavy models like qwen3.8:27b emit
+    long exhaustive lists and, with only 4096 reserved, hit the context
+    window mid-extraction (``done_reason: length``) and silently truncate.
     """
     import time
 
@@ -662,6 +669,7 @@ def _call_ollama_chat(
     if num_ctx is None:
         num_ctx = _dynamic_num_ctx(
             system_prompt, user_prompt, floor=config.num_ctx,
+            output_reserve=output_reserve,
         )
     if timeout is None:
         timeout = config.timeout
@@ -744,8 +752,11 @@ def _summarize_ollama_twopass(
     extract_user = extract_user_tmpl.format(transcript=transcript_text)
     extracted, t1 = _call_ollama_chat(
         extract_sys, extract_user, config,
-        # Pass 1 needs the full transcript to fit; let _dynamic_num_ctx size it
+        # Pass 1 needs the full transcript to fit AND room for a long
+        # exhaustive extraction. Reserve 16K output tokens (not the 4K
+        # default) so thinking-heavy models don't truncate mid-list.
         num_ctx=None,
+        output_reserve=16384,
         timeout=config.timeout,
         temperature=config.temperature,
     )

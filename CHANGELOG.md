@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.15.1 — fix: two-pass extraction truncated on thinking-heavy models
+
+### Fixed — correctness
+
+* **`millet/summarize.py`** — the Ollama two-pass flow reserved only 4096
+  output tokens when auto-sizing Pass 1's context window (`_dynamic_num_ctx`).
+  Thinking-heavy models that emit long exhaustive extractions — notably
+  `qwen3.8:27b` — exhausted the window mid-list and were silently cut off
+  (`done_reason: length`), roughly halving topic/action/question coverage on
+  larger meetings. Pass 1 now reserves 16384 output tokens; Pass 2 (small
+  input) is unchanged. `_call_ollama_chat` gained an `output_reserve`
+  parameter. Measured on a 44 KB English meeting, Pass 1 extraction grew from
+  ~1.8 KB to ~5.6 KB and topic coverage rose from 8 to 20 (matching the
+  cloud baseline); verified on English, Turkish, and German meetings.
+
 ## v0.15.0 — feat: sync pushes user attachments verbatim
 
 ### Added

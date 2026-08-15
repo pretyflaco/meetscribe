@@ -16,9 +16,28 @@ from millet.summarize import (
     _build_format_system_prompt,
     _default_model_for_backend,
     _dispatch,
+    _dynamic_num_ctx,
     _resolve_model,
     _resolve_ollama_singlepass,
 )
+
+# ─── Dynamic context sizing ────────────────────────────────────────────────
+
+class TestDynamicNumCtx:
+    def test_output_reserve_widens_context(self):
+        # A larger output reserve must grow the computed context so a long
+        # extraction has room; Pass 1 relies on this to avoid truncation.
+        sys_p = "system " * 200
+        user = "word " * 4000  # a sizeable transcript
+        small = _dynamic_num_ctx(sys_p, user, output_reserve=4096)
+        large = _dynamic_num_ctx(sys_p, user, output_reserve=16384)
+        assert large > small
+        # The delta reflects the extra reserve (rounded to 1024).
+        assert large - small == pytest.approx(16384 - 4096, abs=1024)
+
+    def test_respects_ceiling(self):
+        huge = "x " * 40000
+        assert _dynamic_num_ctx(huge, huge, output_reserve=16384) <= 65536
 
 # ─── Fallback model resolution ─────────────────────────────────────────────
 
@@ -111,11 +130,12 @@ class TestSummarizeOllamaTwopass:
         calls: list[dict] = []
 
         def fake_call(system_prompt, user_prompt, config, *, num_ctx=None,
-                      timeout=None, temperature=None):
+                      output_reserve=4096, timeout=None, temperature=None):
             calls.append({
                 "system": system_prompt,
                 "user": user_prompt,
                 "num_ctx": num_ctx,
+                "output_reserve": output_reserve,
                 "timeout": timeout,
             })
             if len(calls) == 1:
@@ -130,11 +150,15 @@ class TestSummarizeOllamaTwopass:
         )
 
         assert len(calls) == 2
-        # Pass 1: dynamic num_ctx (None passed in), full timeout
+        # Pass 1: dynamic num_ctx (None passed in), full timeout, and a wide
+        # output reserve so thinking-heavy models don't truncate mid-extraction
+        # (qwen3.8:27b hit done_reason=length with the 4096 default).
         assert calls[0]["num_ctx"] is None
+        assert calls[0]["output_reserve"] == 16384
         assert calls[0]["timeout"] == cfg.timeout
-        # Pass 2: capped at 8192 ctx, capped at 240s
+        # Pass 2: capped at 8192 ctx, capped at 240s, default reserve
         assert calls[1]["num_ctx"] == 8192
+        assert calls[1]["output_reserve"] == 4096
         assert calls[1]["timeout"] == min(cfg.timeout, 240)
         # Pass 2 user prompt should contain the Pass 1 extraction
         assert "1. Topic A" in calls[1]["user"]
